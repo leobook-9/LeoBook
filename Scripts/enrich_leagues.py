@@ -823,21 +823,52 @@ async def main(limit: Optional[int] = None, reset: bool = False,
             timezone_id="Africa/Lagos",
         )
 
-        # Process leagues with concurrency control
+        # ── Progress tracking with 20% cloud sync ────────────────────────
+        from Data.Access.sync_manager import run_full_sync
         sem = asyncio.Semaphore(MAX_CONCURRENCY)
 
+        completed_count = 0
+        sync_milestones = set()
+        # Pre-calculate 20% milestone thresholds (at 20%, 40%, 60%, 80%)
+        for pct in [20, 40, 60, 80]:
+            milestone = max(1, (total * pct) // 100)
+            sync_milestones.add(milestone)
+
+        progress_lock = asyncio.Lock()
+
         async def _worker(league, idx):
+            nonlocal completed_count
             async with sem:
                 await enrich_single_league(
                     context, league, conn, idx, total,
                     num_seasons=num_seasons, all_seasons=all_seasons,
                 )
+            # Track progress and trigger sync at milestones
+            async with progress_lock:
+                completed_count += 1
+                if completed_count in sync_milestones:
+                    pct = (completed_count * 100) // total
+                    print(f"\n  [SYNC] {pct}% milestone ({completed_count}/{total}) — syncing to Supabase...")
+                    try:
+                        await run_full_sync(session_name=f"Enrich {pct}%")
+                        print(f"  [SYNC] {pct}% sync complete.")
+                    except Exception as e:
+                        print(f"  [SYNC] {pct}% sync failed (continuing): {e}")
 
         tasks = [_worker(lg, i) for i, lg in enumerate(leagues, 1)]
         await asyncio.gather(*tasks)
 
         await context.close()
         await browser.close()
+
+    # ── Final 100% cloud sync ─────────────────────────────────────────
+    print(f"\n  [SYNC] 100% — final cloud sync...")
+    try:
+        from Data.Access.sync_manager import run_full_sync
+        await run_full_sync(session_name="Enrich 100%")
+        print(f"  [SYNC] Final sync complete.")
+    except Exception as e:
+        print(f"  [SYNC] Final sync failed: {e}")
 
     # ── Final summary ────────────────────────────────────────────────────
     league_count = conn.execute("SELECT COUNT(*) FROM leagues").fetchone()[0]
