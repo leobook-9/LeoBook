@@ -42,7 +42,7 @@ Leo.py (Orchestrator)
 ├── Chapter 2 (Betting Automation):
 │   ├── Ch2 P1: Automated Booking (Football.com)
 │   └── Ch2 P2: Funds & Withdrawal Check
-└── Live Streamer: Isolated parallel task — 60s LIVE score streaming + outcome review
+└── Live Streamer: Isolated parallel task — Live Scores + Outcome Review + Accuracy Report (Waits for Bootstrap Sync)
 ```
 
 ### Key Subsystems
@@ -118,21 +118,22 @@ The app implements a **Telegram-inspired high-density aesthetic** optimized for 
 ```bash
 # Setup
 pip install -r requirements.txt
+pip install -r requirements-rl.txt  # Core RL/AI dependencies
 playwright install chromium
-bash .devcontainer/setup.sh  # Auto-config
+bash .devcontainer/setup.sh         # Auto-config system environment
 
 # Execution
-python Leo.py              # Autonomous mode (dynamic scheduling)
+python Leo.py              # Autonomous Orchestrator (Full dynamic cycle)
+python Leo.py --sync        # Bi-directional cloud sync (Bootstrap parity)
 python Leo.py --prologue    # Data readiness check (P1-P3)
 python Leo.py --chapter 1   # Prediction pipeline (Odds → Predict → Sync)
 python Leo.py --chapter 2   # Betting automation
-python Leo.py --sync        # Bi-directional cloud sync
-python Leo.py --review      # Outcome review
-python Leo.py --recommend   # Recommendations
-python Leo.py --streamer    # Standalone live score streamer
-python Leo.py --enrich-leagues --weekly  # Lightweight weekly enrichment
-python Leo.py --train-rl    # Chronological RL training
-python Leo.py --help        # Full CLI catalog
+python Leo.py --review      # Outcome review (Finished matches)
+python Leo.py --recommend   # Recommendations generation
+python Leo.py --streamer    # Standalone Live Multi-Tasker (Scores/Review/Reports)
+python Leo.py --enrich-leagues --weekly  # Lightweight weekly metadata sync
+python Leo.py --train-rl    # Chronological RL model training
+python Leo.py --help        # Comprehensive CLI command catalog
 ```
 
 ---

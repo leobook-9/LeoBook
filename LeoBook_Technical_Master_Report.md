@@ -48,7 +48,7 @@ LeoBook is an **autonomous sports prediction and betting system** comprised of t
 | File | Function |
 |------|----------|
 | `Modules/Flashscore/fs_processor.py` | Per-match H2H + Enrichment + Search Dict |
-| `Modules/Flashscore/fs_live_streamer.py` | Isolated live score streaming + outcome review |
+| `Modules/Flashscore/fs_live_streamer.py` | Isolated live score streaming + outcome review + accuracy reports |
 | `Modules/FootballCom/fb_manager.py` | Odds harvesting, automated booking |
 
 ### 2.4 `Data/` — Persistence Layer

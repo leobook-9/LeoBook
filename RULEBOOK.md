@@ -61,7 +61,7 @@ Chapter 1:
 Chapter 2:
     P1: Automated Booking (Football.com)
     P2: Funds & Withdrawal Check
-Live Streamer: Isolated parallel task — Live score updates + outcome review
+Live Streamer: Isolated parallel task — Live Scores + Outcome Review + Accuracy Reports
 ```
 
 ### 2.5 Standings Table Is FORBIDDEN

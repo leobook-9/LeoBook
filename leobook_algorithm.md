@@ -28,7 +28,7 @@ Leo.py (Orchestrator) v7.0
 ├── Chapter 2 (Betting Automation):
 │   ├── P1: Automated Booking (Football.com)
 │   └── P2: Funds & Withdrawal Check
-└── Live Streamer: Isolated parallel task (60s updates + outcome review)
+└── Live Streamer: Isolated parallel task (60s updates + outcome review + accuracy reports)
 ```
 
 ---
