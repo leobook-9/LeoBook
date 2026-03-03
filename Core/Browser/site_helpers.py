@@ -17,7 +17,7 @@ async def fs_universal_popup_dismissal(page: Page, context: str = "fs_generic"):
     try:
         understand_selectors = [
             SelectorManager.get_selector(context, 'tooltip_i_understand_button'),
-            "button:has-text('I understand')",
+            SelectorManager.get_selector(context, 'i_understand_text'),
         ]
         for sel in understand_selectors:
             if sel:
@@ -121,16 +121,15 @@ async def get_main_frame(page: Page) -> Optional[Page | Frame]:
     """
     try:
         app_sel = SelectorManager.get_selector('fb_match_page', 'app_iframe')
-        if not app_sel:
-            app_sel = '#app'  # Ultimate fallback
-        iframe_locator = page.locator(app_sel)
-        if await iframe_locator.count() > 0:
-            iframe_element = await iframe_locator.element_handle()
-            frame = await iframe_element.content_frame()
-            if frame:
-                await frame.wait_for_load_state('networkidle', timeout=30000)
-                print("  [Frame] Switched to main #app iframe.")
-                return frame
+        if app_sel:
+            iframe_locator = page.locator(app_sel)
+            if await iframe_locator.count() > 0:
+                iframe_element = await iframe_locator.element_handle()
+                frame = await iframe_element.content_frame()
+                if frame:
+                    await frame.wait_for_load_state('networkidle', timeout=30000)
+                    print(f"  [Frame] Switched to main {app_sel} iframe.")
+                    return frame
     except Exception:
-        print("  [Frame] No #app iframe found, using main page.")
+        print("  [Frame] No app iframe found, using main page.")
     return page

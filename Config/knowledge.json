@@ -54,20 +54,37 @@
         "score_final_state": "final"
     },
     "fs_league_page": {
-        "league_crest": "img.heading__logo",
+        "league_crest": "img.heading__logo, .heading__logo img, .tournamentHeader__logo img",
         "region_flag": ".breadcrumb__flag",
         "league_name": ".heading__name",
         "region_name": ".breadcrumb__link",
         "results_tab": "a[href*='/results/']",
         "fixtures_tab": "a[href*='/fixtures/']",
         "standings_tab": "a[href*='/standings/']",
+        "archive_tab": "a[href*='/archive/']",
+        "main_container": ".sportName, .leagues--static, [class*='event__']",
         "match_row": "[id^='g_1_']",
-        "show_more_matches": ".event__more",
+        "match_round": ".event__round",
+        "match_time": ".event__time",
+        "match_stage": ".event__stage",
+        "match_stage_block": ".event__stage--block",
+        "match_stage_pkv": ".event__stage--pkv",
+        "match_score_home": ".event__score--home",
+        "match_score_away": ".event__score--away",
+        "match_logo_home": ".event__logo--home img, .event__homeParticipant img",
+        "match_logo_away": ".event__logo--away img, .event__awayParticipant img",
+        "match_link": "a[href*='/match/']",
+        "show_more_matches": ".event__more, a.event__more--static",
         "home_participant": ".event__homeParticipant",
         "away_participant": ".event__awayParticipant",
+        "participant_name": "[class*='wcl-name'], .event__participant--name",
         "team_name": ".wcl-name_jjfMf",
         "team_link": "a[href*='/team/']",
-        "team_logo": "img"
+        "team_logo": "img",
+        "season_info": ".heading__info, .heading__title--desc, .tournamentHeader__season, .heading__category",
+        "breadcrumb_text": ".breadcrumb__text",
+        "archive_links": "a[href*='/results/'], a[href*='/fixtures/'], .archive__row a, .archive__season a",
+        "archive_table_links": ".archive__row a, .archive__text a, td a[href*='/football/']"
     },
     "fs_match_page": {
         "region_flag_img": "ol.wcl-breadcrumbList_lC9sI img[data-testid^='wcl-flag-']",
@@ -138,7 +155,8 @@
     "fs_generic": {
         "cookie_consent": "#onetrust-accept-btn-handler",
         "tooltip_close": ".wcl-close_Ohlz6",
-        "tooltip_i_understand_button": "button[data-testid=\"wcl-tooltip-actionButton\"]"
+        "tooltip_i_understand_button": "button[data-testid=\"wcl-tooltip-actionButton\"]",
+        "i_understand_text": "button:has-text('I understand')"
     },
     "fb_match_page": {
         "match_header": ".m-match-header, .header-container, #event-detail-header-nav",

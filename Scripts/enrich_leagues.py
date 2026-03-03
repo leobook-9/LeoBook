@@ -30,12 +30,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from Core.Utils.constants import now_ng
 from Core.Intelligence.aigo_suite import AIGOSuite
+from Core.Intelligence.selector_manager import SelectorManager
 from Data.Access.league_db import (
     init_db, get_connection, upsert_league, upsert_team, upsert_fixture,
     bulk_upsert_fixtures, mark_league_processed, get_unprocessed_leagues,
     get_league_db_id, get_team_id,
 )
 from Core.Browser.site_helpers import fs_universal_popup_dismissal
+
+# ── Selectors (Unified Knowledge Base) ───────────────────────────────────────
+selector_mgr = SelectorManager()
+CONTEXT_LEAGUE = "fs_league_page"
 
 # ── Paths (RELATIVE from project root) ───────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -123,78 +128,65 @@ def seed_leagues_from_json(conn):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── JS to extract all match data with smart year detection + team IDs ────────
-# seasonContext is passed from Python: {startYear, endYear, isSplitSeason, tab}
-EXTRACT_MATCHES_JS = r"""(seasonCtx) => {
+# seasonContext is passed from Python: {startYear, endYear, isSplitSeason, tab, selectors}
+EXTRACT_MATCHES_JS = r"""(ctx) => {
     const matches = [];
+    const s = ctx.selectors;
 
     // Season-aware year inference
-    const startYear = seasonCtx.startYear || new Date().getFullYear();
-    const endYear = seasonCtx.endYear || startYear;
-    const isSplitSeason = seasonCtx.isSplitSeason || false;
-    const tab = seasonCtx.tab || 'results';  // 'fixtures' or 'results'
+    const startYear = ctx.startYear || new Date().getFullYear();
+    const endYear = ctx.endYear || startYear;
+    const isSplitSeason = ctx.isSplitSeason || false;
+    const tab = ctx.tab || 'results';
     const today = new Date();
 
     function inferYear(day, month) {
-        if (!isSplitSeason) {
-            // Calendar-year league: all dates belong to the single year
-            return startYear;
-        }
-        // Split season (e.g. 2023-2024): Aug-Dec -> startYear, Jan-Jul -> endYear
-        if (month >= 7) {  // July onwards -> first year (pre-season starts July/Aug)
-            return startYear;
-        } else {
-            return endYear;
-        }
+        if (!isSplitSeason) return startYear;
+        if (month >= 7) return startYear;
+        return endYear;
     }
 
     // Walk ALL sibling elements in the event list
-    const container = document.querySelector('.sportName, .leagues--static, [class*="event__"]')?.parentElement
-        || document.body;
-    const allEls = container.querySelectorAll('.event__round, [id^="g_1_"]');
+    const container = document.querySelector(s.main_container)?.parentElement || document.body;
+    const allEls = container.querySelectorAll(`${s.match_round}, ${s.match_row}`);
     let currentRound = '';
 
     allEls.forEach(el => {
-        if (el.classList.contains('event__round')) {
+        if (el.matches(s.match_round)) {
             currentRound = el.innerText.trim();
             return;
         }
-        if (!el.id || !el.id.startsWith('g_1_')) return;
+        const rowId = el.getAttribute('id') || '';
+        if (!rowId || !rowId.startsWith('g_1_')) return;
 
         const row = el;
-        const fixtureId = row.id.replace('g_1_', '');
+        const fixtureId = rowId.replace('g_1_', '');
 
         // ── Time + Date ──
-        const timeEl = row.querySelector('.event__time');
+        const timeEl = row.querySelector(s.match_time);
         let matchTime = '';
         let matchDate = '';
         let extraTag = '';
 
         if (timeEl) {
-            // Check for FRO or Postp sub-elements
-            const stageInTime = timeEl.querySelector('.event__stage--block, .event__stage--pkv, .event__stage');
+            const stageInTime = timeEl.querySelector(`${s.match_stage_block}, ${s.match_stage_pkv}, ${s.match_stage}`);
             if (stageInTime) {
                 extraTag = stageInTime.innerText.trim();
             }
 
-            // Get the raw text without sub-element text
             let raw = '';
             for (const node of timeEl.childNodes) {
-                if (node.nodeType === 3) {  // Text node
-                    raw += node.textContent;
-                } else if (node.classList && node.classList.contains('lineThrough')) {
-                    raw += node.textContent;
-                }
+                if (node.nodeType === 3) raw += node.textContent;
+                else if (node.classList && node.classList.contains('lineThrough')) raw += node.textContent;
             }
             raw = raw.trim();
             if (!raw) raw = timeEl.innerText.trim().replace(/FRO|Postp\.?|Canc\.?|Abn\.?/gi, '').trim();
 
-            // Try DD.MM.YYYY HH:MM (full year)
             const fullMatch = raw.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
             if (fullMatch) {
                 matchDate = `${fullMatch[3]}-${fullMatch[2]}-${fullMatch[1]}`;
                 matchTime = `${fullMatch[4]}:${fullMatch[5]}`;
             } else {
-                // Try DD.MM. HH:MM (no year — use smart detection)
                 const shortMatch = raw.match(/(\d{2})\.(\d{2})\.\s*(\d{2}):(\d{2})/);
                 if (shortMatch) {
                     const day = parseInt(shortMatch[1]);
@@ -203,7 +195,6 @@ EXTRACT_MATCHES_JS = r"""(seasonCtx) => {
                     matchDate = `${year}-${shortMatch[2]}-${shortMatch[1]}`;
                     matchTime = `${shortMatch[3]}:${shortMatch[4]}`;
                 } else {
-                    // Just time HH:MM
                     const justTime = raw.match(/(\d{2}):(\d{2})/);
                     if (justTime) matchTime = `${justTime[1]}:${justTime[2]}`;
                 }
@@ -211,18 +202,18 @@ EXTRACT_MATCHES_JS = r"""(seasonCtx) => {
         }
 
         // ── Home & Away teams ──
-        const homeEl = row.querySelector('.event__homeParticipant');
+        const homeEl = row.querySelector(s.home_participant);
         const homeName = homeEl ?
-            (homeEl.querySelector('[class*="wcl-name"], .event__participant--name') || homeEl)
+            (homeEl.querySelector(s.participant_name) || homeEl)
                 .innerText.trim().replace(/\s*\(.*?\)\s*$/, '') : '';
-        const awayEl = row.querySelector('.event__awayParticipant');
+        const awayEl = row.querySelector(s.away_participant);
         const awayName = awayEl ?
-            (awayEl.querySelector('[class*="wcl-name"], .event__participant--name') || awayEl)
+            (awayEl.querySelector(s.participant_name) || awayEl)
                 .innerText.trim().replace(/\s*\(.*?\)\s*$/, '') : '';
 
         // ── Scores ──
-        const homeScoreEl = row.querySelector('.event__score--home');
-        const awayScoreEl = row.querySelector('.event__score--away');
+        const homeScoreEl = row.querySelector(s.match_score_home);
+        const awayScoreEl = row.querySelector(s.match_score_away);
         const homeScoreText = homeScoreEl ? homeScoreEl.innerText.trim() : '';
         const awayScoreText = awayScoreEl ? awayScoreEl.innerText.trim() : '';
         const homeScore = homeScoreText && homeScoreText !== '-' ? parseInt(homeScoreText) : null;
@@ -230,8 +221,8 @@ EXTRACT_MATCHES_JS = r"""(seasonCtx) => {
 
         // ── Match status ──
         let matchStatus = '';
-        const stageEl = row.querySelector('.event__stage--block, .event__stage');
-        if (stageEl && !stageEl.closest('.event__time')) {
+        const stageEl = row.querySelector(`${s.match_stage_block}, ${s.match_stage}`);
+        if (stageEl && !stageEl.closest(s.match_time)) {
             matchStatus = stageEl.innerText.trim();
         } else if (homeScoreEl) {
             const state = homeScoreEl.getAttribute('data-state') || '';
@@ -242,25 +233,24 @@ EXTRACT_MATCHES_JS = r"""(seasonCtx) => {
         }
 
         // ── Team crests ──
-        const homeImg = row.querySelector('.event__logo--home img, .event__homeParticipant img');
-        const awayImg = row.querySelector('.event__logo--away img, .event__awayParticipant img');
+        const homeImg = row.querySelector(s.match_logo_home);
+        const awayImg = row.querySelector(s.match_logo_away);
         const homeCrest = homeImg ? (homeImg.src || homeImg.getAttribute('data-src') || '') : '';
         const awayCrest = awayImg ? (awayImg.src || awayImg.getAttribute('data-src') || '') : '';
 
         // ── Team ID + URL from match link ──
         let homeTeamId = '', awayTeamId = '', homeTeamUrl = '', awayTeamUrl = '';
-        const linkEl = row.querySelector('a[href*="/match/"]');
+        const linkEl = row.querySelector(s.match_link);
         const mLink = linkEl ? linkEl.getAttribute('href') : '';
         if (mLink && mLink.includes('/match/football/')) {
             const cleanPath = mLink.replace(/^(.*\/match\/football\/)/, '');
             const parts = cleanPath.split('/').filter(p => p && !p.startsWith('?'));
             if (parts.length >= 2) {
                 const hSeg = parts[0]; const aSeg = parts[1];
-                const hSlug = hSeg.substring(0, hSeg.lastIndexOf('-'));
                 homeTeamId = hSeg.substring(hSeg.lastIndexOf('-') + 1);
-                const aSlug = aSeg.substring(0, aSeg.lastIndexOf('-'));
                 awayTeamId = aSeg.substring(aSeg.lastIndexOf('-') + 1);
-
+                const hSlug = hSeg.substring(0, hSeg.lastIndexOf('-'));
+                const aSlug = aSeg.substring(0, aSeg.lastIndexOf('-'));
                 if (hSlug && homeTeamId) homeTeamUrl = `https://www.flashscore.com/team/${hSlug}/${homeTeamId}/`;
                 if (aSlug && awayTeamId) awayTeamUrl = `https://www.flashscore.com/team/${aSlug}/${awayTeamId}/`;
             }
@@ -291,14 +281,10 @@ EXTRACT_MATCHES_JS = r"""(seasonCtx) => {
 }"""
 
 # ── JS to extract season text ───────────────────────────────────────────────
-EXTRACT_SEASON_JS = r"""() => {
-    const selectors = [
-        '.heading__info',
-        '.heading__title--desc',
-        '.tournamentHeader__season',
-        '.heading__category'
-    ];
-    for (const sel of selectors) {
+EXTRACT_SEASON_JS = r"""(selectors) => {
+    const s = selectors;
+    const possible = s.season_info.split(',').map(x => x.trim());
+    for (const sel of possible) {
         const el = document.querySelector(sel);
         if (el) {
             const text = el.innerText.trim();
@@ -306,7 +292,7 @@ EXTRACT_SEASON_JS = r"""() => {
             if (match) return match[1];
         }
     }
-    const breadcrumbs = document.querySelectorAll('.breadcrumb__text');
+    const breadcrumbs = document.querySelectorAll(s.breadcrumb_text);
     for (const b of breadcrumbs) {
         const match = b.innerText.match(/(\d{4}(?:\/\d{4})?)/);
         if (match) return match[1];
@@ -315,8 +301,8 @@ EXTRACT_SEASON_JS = r"""() => {
 }"""
 
 # ── JS to extract league crest URL ──────────────────────────────────────────
-EXTRACT_CREST_JS = r"""() => {
-    const img = document.querySelector('img.heading__logo, .heading__logo img, .tournamentHeader__logo img');
+EXTRACT_CREST_JS = r"""(selectors) => {
+    const img = document.querySelector(selectors.league_crest);
     return img ? (img.src || img.getAttribute('data-src') || '') : '';
 }"""
 
@@ -337,13 +323,13 @@ EXTRACT_FS_LEAGUE_ID_JS = r"""() => {
 }"""
 
 # ── JS to extract archive season links ──────────────────────────────────────
-EXTRACT_ARCHIVE_JS = r"""() => {
+EXTRACT_ARCHIVE_JS = r"""(selectors) => {
+    const s = selectors;
     const seasons = [];
-    const links = document.querySelectorAll('a[href*="/results/"], a[href*="/fixtures/"], .archive__row a, .archive__season a');
+    const links = document.querySelectorAll(s.archive_links);
     const seen = new Set();
     for (const a of links) {
         const href = a.getAttribute('href') || '';
-        // Match patterns like /football/england/premier-league-2023-2024/
         const match = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4})-(\d{4}))\/?/);
         if (match && !seen.has(match[2])) {
             seen.add(match[2]);
@@ -355,7 +341,6 @@ EXTRACT_ARCHIVE_JS = r"""() => {
                 url: href.startsWith('http') ? href : 'https://www.flashscore.com' + href
             });
         }
-        // Calendar-year seasons like /premier-league-2024/
         const calMatch = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4}))\/?$/);
         if (calMatch && !seen.has(calMatch[2])) {
             seen.add(calMatch[2]);
@@ -368,8 +353,7 @@ EXTRACT_ARCHIVE_JS = r"""() => {
             });
         }
     }
-    // Also check the archive table rows
-    const tableLinks = document.querySelectorAll('.archive__row a, .archive__text a, td a[href*="/football/"]');
+    const tableLinks = document.querySelectorAll(s.archive_table_links);
     for (const a of tableLinks) {
         const href = a.getAttribute('href') || '';
         const m = href.match(/\/football\/([^/]+)\/([^/]+-(\d{4})-(\d{4}))\/?/);
@@ -391,7 +375,6 @@ EXTRACT_ARCHIVE_JS = r"""() => {
             });
         }
     }
-    // Sort by start_year descending (most recent first)
     seasons.sort((a, b) => b.start_year - a.start_year);
     return seasons;
 }"""
@@ -434,7 +417,8 @@ async def get_archive_seasons(page: Page, league_url: str) -> List[Dict]:
         await page.goto(archive_url, wait_until="domcontentloaded", timeout=60000)
         await asyncio.sleep(3)
         await fs_universal_popup_dismissal(page)
-        seasons = await page.evaluate(EXTRACT_ARCHIVE_JS)
+        selectors = selector_mgr.get_all_selectors_for_context(CONTEXT_LEAGUE)
+        seasons = await page.evaluate(EXTRACT_ARCHIVE_JS, selectors)
         print(f"    [Archive] Found {len(seasons)} historical seasons")
         return seasons or []
     except Exception as e:
@@ -450,9 +434,10 @@ async def get_archive_seasons(page: Page, league_url: str) -> List[Dict]:
 async def _expand_show_more(page: Page, max_clicks: int = MAX_SHOW_MORE):
     """Click 'Show more matches' exhaustively."""
     clicks = 0
+    selector = selector_mgr.get_selector(CONTEXT_LEAGUE, "show_more_matches")
     while clicks < max_clicks:
         try:
-            btn = page.locator(".event__more, a.event__more--static")
+            btn = page.locator(selector)
             if await btn.count() > 0 and await btn.first.is_visible(timeout=3000):
                 await btn.first.click()
                 await asyncio.sleep(1.5)
@@ -490,6 +475,7 @@ async def extract_tab(page: Page, league_url: str, tab: str, conn,
     # Build season context for smart year detection
     season_ctx = parse_season_string(season)
     season_ctx["tab"] = tab
+    season_ctx["selectors"] = selector_mgr.get_all_selectors_for_context(CONTEXT_LEAGUE)
 
     # Extract match data with season context
     try:
@@ -695,8 +681,11 @@ async def enrich_single_league(context, league: Dict[str, Any], conn,
         if fs_league_id:
             print(f"    [FS ID] {fs_league_id}")
 
+        # Retrieve all selectors once for this context
+        selectors = selector_mgr.get_all_selectors_for_context(CONTEXT_LEAGUE)
+
         # ── Extract + download league crest ──────────────────────────────
-        crest_url = await page.evaluate(EXTRACT_CREST_JS)
+        crest_url = await page.evaluate(EXTRACT_CREST_JS, selectors)
         crest_path = ""
         if crest_url and not crest_url.startswith("data:"):
             dest = os.path.join(LEAGUE_CRESTS_DIR, f"{_slugify(league_id)}.png")
@@ -710,7 +699,7 @@ async def enrich_single_league(context, league: Dict[str, Any], conn,
                 print(f"    [Crest] [!] Failed to download crest")
 
         # ── Extract current season ───────────────────────────────────────
-        season = await page.evaluate(EXTRACT_SEASON_JS)
+        season = await page.evaluate(EXTRACT_SEASON_JS, selectors)
         print(f"    [Season] {season or '(not found)'}")
 
         # ── Update league in DB with fs_league_id ────────────────────────

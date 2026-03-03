@@ -405,6 +405,80 @@ def _create_post_alter_indexes(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _reconstruct_teams_table_if_legacy_unique_exists(conn: sqlite3.Connection):
+    """
+    Remove legacy UNIQUE(name, country_code) constraint from teams table.
+    SQLite doesn't support DROP CONSTRAINT, so we must reconstruct the table.
+    """
+    try:
+        # Check if the constraint exists in the schema
+        res = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='teams'").fetchone()
+        if not res:
+            return
+        sql = res[0]
+
+        # Only reconstruct if UNIQUE(name, country_code) is present
+        if "UNIQUE(name, country_code)" not in sql and "UNIQUE (name, country_code)" not in sql:
+            return
+
+        print("  [Migration] Removing legacy UNIQUE constraint from teams table...")
+
+        # 1. Create temporary table with CORRECT schema (matching _SCHEMA_SQL + migrations)
+        temp_table_sql = """
+            CREATE TABLE teams_new (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id             TEXT UNIQUE,
+                name                TEXT NOT NULL,
+                league_ids          JSON,
+                crest               TEXT,
+                country_code        TEXT,
+                url                 TEXT,
+                hq_crest            INTEGER DEFAULT 0,
+                country             TEXT,
+                city                TEXT,
+                stadium             TEXT,
+                other_names         TEXT,
+                abbreviations       TEXT,
+                search_terms        TEXT,
+                last_updated        TEXT DEFAULT (datetime('now'))
+            )
+        """
+        conn.execute(temp_table_sql)
+
+        # 2. Copy data. Handle columns that might not exist in old table yet
+        # (Though by this point init_db has run _run_alter_migrations)
+        cursor = conn.execute("PRAGMA table_info(teams)")
+        existing_cols = [row[1] for row in cursor.fetchall()]
+        
+        target_cols = [
+            'id', 'team_id', 'name', 'league_ids', 'crest', 'country_code', 'url',
+            'hq_crest', 'country', 'city', 'stadium', 'other_names', 'abbreviations',
+            'search_terms', 'last_updated'
+        ]
+        
+        # Filter target_cols to only those that exist in the old table
+        cols_to_copy = [c for c in target_cols if c in existing_cols]
+        cols_str = ", ".join(cols_to_copy)
+
+        conn.execute(f"INSERT INTO teams_new ({cols_str}) SELECT {cols_str} FROM teams")
+
+        # 3. Swap tables
+        conn.execute("DROP TABLE teams")
+        conn.execute("ALTER TABLE teams_new RENAME TO teams")
+
+        # 4. Re-create indexes
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_team_id_unique ON teams(team_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)")
+
+        conn.commit()
+        print("  [Migration] [OK] Teams table reconstructed successfully.")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"  [Migration] [!] Error reconstructing teams table: {e}")
+
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     """Create all tables, run migrations, auto-import CSVs. Returns the connection."""
     if conn is None:
@@ -415,6 +489,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
 
     _run_alter_migrations(conn)
     _create_post_alter_indexes(conn)
+    _reconstruct_teams_table_if_legacy_unique_exists(conn)
     _auto_import_csvs(conn)
 
     return conn
