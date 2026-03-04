@@ -641,6 +641,43 @@ def get_unprocessed_leagues(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_leagues_with_gaps(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Return leagues with missing critical enrichment data.
+    
+    This is the SMART default: finds leagues that were either never processed
+    OR were processed but have empty columns (silent failures).
+    Checks: fs_league_id, region, crest, current_season.
+    """
+    rows = conn.execute(
+        """SELECT * FROM leagues
+           WHERE url IS NOT NULL AND url != ''
+             AND (
+               processed = 0
+               OR fs_league_id IS NULL OR fs_league_id = ''
+               OR region IS NULL OR region = ''
+               OR crest IS NULL OR crest = ''
+               OR current_season IS NULL OR current_season = ''
+             )
+           ORDER BY id"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_stale_leagues(conn: sqlite3.Connection, days: int = 7) -> List[Dict[str, Any]]:
+    """Return leagues not updated in the last N days."""
+    rows = conn.execute(
+        """SELECT * FROM leagues
+           WHERE url IS NOT NULL AND url != ''
+             AND (
+               last_updated IS NULL
+               OR last_updated < datetime('now', ? || ' days')
+             )
+           ORDER BY id""",
+        (f"-{days}",)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Team operations
 # ---------------------------------------------------------------------------

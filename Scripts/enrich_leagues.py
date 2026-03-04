@@ -1,18 +1,25 @@
 # enrich_leagues.py: Extract Flashscore league pages -> SQLite database.
 # Part of LeoBook Scripts — Data Collection
 #
+# Enrichment Modes:
+#   (default)  Smart gap scan — only leagues with missing data
+#   --refresh  Re-process stale leagues (>7 days old)
+#   --reset    Full reset — re-enrich ALL leagues from scratch
+#
 # Usage:
-#   python -m Scripts.enrich_leagues                     # All leagues (current season)
-#   python -m Scripts.enrich_leagues --limit 5           # First 5 unprocessed
-#   python -m Scripts.enrich_leagues --limit 501-1000    # Range-based (leagues 501 to 1000)
-#   python -m Scripts.enrich_leagues --reset             # Reset processed flags
+#   python -m Scripts.enrich_leagues                     # Gap scan (default)
+#   python -m Scripts.enrich_leagues --limit 5           # First 5 with gaps
+#   python -m Scripts.enrich_leagues --limit 501-1000    # Range-based
+#   python -m Scripts.enrich_leagues --refresh           # Stale leagues only
+#   python -m Scripts.enrich_leagues --reset             # Full reset
 #   python -m Scripts.enrich_leagues --seasons 2         # Last 2 seasons per league
 #   python -m Scripts.enrich_leagues --season 1          # ONLY the most recent past season
 #   python -m Scripts.enrich_leagues --all-seasons       # All available seasons
 #
-# Reads Data/Store/leagues.json -> populates leagues/teams/fixtures tables
-# Downloads crests concurrently via ThreadPoolExecutor
-# All CSS selectors loaded from Config/knowledge.json via SelectorManager
+# Features:
+#   - Workload announced at start
+#   - Cloud sync at every 20% checkpoint
+#   - All CSS selectors loaded from Config/knowledge.json via SelectorManager
 
 import asyncio
 import argparse
@@ -37,6 +44,7 @@ from Core.Intelligence.selector_manager import SelectorManager
 from Data.Access.league_db import (
     init_db, get_connection, upsert_league, upsert_team, upsert_fixture,
     bulk_upsert_fixtures, mark_league_processed, get_unprocessed_leagues,
+    get_leagues_with_gaps, get_stale_leagues,
     get_league_db_id, get_team_id,
 )
 from Core.Browser.site_helpers import fs_universal_popup_dismissal
@@ -882,8 +890,14 @@ async def enrich_single_league(context, league: Dict[str, Any], conn,
 
 async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False,
                num_seasons: int = 0, all_seasons: bool = False,
-               weekly: bool = False, target_season: Optional[int] = None):
+               weekly: bool = False, target_season: Optional[int] = None,
+               refresh: bool = False):
     """Main enrichment entry point.
+
+    Enrichment modes (in priority order):
+        1. --reset:   Re-process ALL leagues from scratch
+        2. --refresh: Re-process leagues not updated in 7+ days
+        3. (default): Smart gap scan — only leagues with missing data
 
     Args:
         limit: Max number of leagues to process (after offset)
@@ -893,6 +907,7 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
         all_seasons: If True, extract ALL available seasons
         weekly: If True, only process leagues updated >7 days ago
         target_season: If set, extract ONLY the Nth most recent past season (1-indexed)
+        refresh: If True, re-process stale leagues (>7 days old)
     """
     print("\n" + "=" * 60)
     print("  FLASHSCORE LEAGUE ENRICHMENT -> SQLite")
@@ -910,15 +925,27 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
     # ── Seed leagues from JSON ───────────────────────────────────────────
     seed_leagues_from_json(conn)
 
-    # ── Get unprocessed leagues ──────────────────────────────────────────
-    leagues = get_unprocessed_leagues(conn)
+    # ── Select leagues to process ────────────────────────────────────────
+    if reset:
+        # Full reset: process everything
+        leagues = get_unprocessed_leagues(conn)
+        scan_mode = "FULL RESET"
+    elif refresh or weekly:
+        # Stale refresh: leagues not updated in 7+ days
+        leagues = get_stale_leagues(conn, days=7)
+        scan_mode = "STALE REFRESH (>7 days)"
+    else:
+        # Default: smart gap scan — leagues with missing critical data
+        leagues = get_leagues_with_gaps(conn)
+        scan_mode = "GAP SCAN (missing data)"
+
     if offset > 0:
         leagues = leagues[offset:]
     if limit:
         leagues = leagues[:limit]
 
     if not leagues:
-        print("\n  [Done] All leagues have been processed. Use --reset to reprocess.")
+        print(f"\n  [Done] No leagues need enrichment ({scan_mode}). Use --reset to force re-process all.")
         return
 
     total = len(leagues)
@@ -927,11 +954,33 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
         mode_label = "ALL seasons"
     elif num_seasons > 0:
         mode_label = f"last {num_seasons} seasons"
-    print(f"\n  [Enrich] {total} leagues to process ({mode_label}, concurrency={MAX_CONCURRENCY})")
+    elif target_season is not None:
+        mode_label = f"season #{target_season} only"
+    # ── Workload announcement ─────────────────────────────────────────────
+    print(f"\n  [Enrich] {total} leagues to process ({scan_mode}, {mode_label}, concurrency={MAX_CONCURRENCY})")
+    print(f"  [Workload] Leagues #{offset + 1} to #{offset + total}:")
+    for wi, wl in enumerate(leagues[:20], 1):
+        print(f"    {wi:>4}. {wl.get('name', '?')} ({wl.get('league_id', '?')})")
+    if total > 20:
+        print(f"    ... and {total - 20} more")
+
+    # Calculate 20% sync checkpoints
+    sync_interval = max(1, total // 5)  # 20% of total
+    sync_checkpoints = set(range(sync_interval, total + 1, sync_interval))
 
     # ── Ensure crest directories exist (from project root) ───────────────
     os.makedirs(os.path.join(BASE_DIR, LEAGUE_CRESTS_DIR), exist_ok=True)
     os.makedirs(os.path.join(BASE_DIR, TEAM_CRESTS_DIR), exist_ok=True)
+
+    # ── Optional: import SyncManager for checkpoints ─────────────────────
+    sync_mgr = None
+    try:
+        from Data.Access.sync_manager import SyncManager
+        sync_mgr = SyncManager()
+    except Exception:
+        pass  # SyncManager not available (standalone mode or no Supabase)
+
+    completed_count = 0
 
     # ── Launch Playwright ────────────────────────────────────────────────
     async with async_playwright() as p:
@@ -945,16 +994,30 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
             timezone_id="Africa/Lagos",
         )
 
-        # Process leagues with concurrency control
+        # Process leagues with concurrency control + 20% sync checkpoints
         sem = asyncio.Semaphore(MAX_CONCURRENCY)
 
         async def _worker(league, idx):
+            nonlocal completed_count
             async with sem:
                 await enrich_single_league(
                     context, league, conn, idx, total,
                     num_seasons=num_seasons, all_seasons=all_seasons,
                     target_season=target_season,
                 )
+                completed_count += 1
+
+                # 20% sync checkpoint
+                if completed_count in sync_checkpoints:
+                    pct = int((completed_count / total) * 100)
+                    print(f"\n  [Checkpoint] {pct}% complete ({completed_count}/{total})")
+                    if sync_mgr:
+                        try:
+                            print(f"  [Sync] Running cloud sync at {pct}%...")
+                            await sync_mgr.push_to_cloud()
+                            print(f"  [Sync] Cloud sync complete")
+                        except Exception as e:
+                            print(f"  [Sync] Cloud sync failed: {e}")
 
         tasks = [_worker(lg, i) for i, lg in enumerate(leagues, 1)]
         await asyncio.gather(*tasks)
@@ -967,11 +1030,17 @@ async def main(limit: Optional[int] = None, offset: int = 0, reset: bool = False
     fixture_count = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
     team_count = conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0]
     processed = conn.execute("SELECT COUNT(*) FROM leagues WHERE processed = 1").fetchone()[0]
+    gaps = conn.execute(
+        """SELECT COUNT(*) FROM leagues WHERE url IS NOT NULL AND url != ''
+           AND (processed = 0 OR fs_league_id IS NULL OR fs_league_id = ''
+                OR region IS NULL OR region = '' OR crest IS NULL OR crest = ''
+                OR current_season IS NULL OR current_season = '')"""
+    ).fetchone()[0]
 
     print(f"\n{'='*60}")
     print(f"  SCRAPING COMPLETE")
     print(f"{'='*60}")
-    print(f"  Leagues:  {league_count} total, {processed} processed")
+    print(f"  Leagues:  {league_count} total, {processed} processed, {gaps} with gaps")
     print(f"  Fixtures: {fixture_count}")
     print(f"  Teams:    {team_count}")
     print(f"  DB:       {os.path.abspath(conn.execute('PRAGMA database_list').fetchone()[2])}")
@@ -987,6 +1056,7 @@ if __name__ == "__main__":
                         metavar='N or START-END',
                         help='Limit items processed. Single number (5) or range (501-1000)')
     parser.add_argument("--reset", action="store_true", help="Reset all leagues to unprocessed")
+    parser.add_argument("--refresh", action="store_true", help="Re-process stale leagues (>7 days old)")
     parser.add_argument("--seasons", type=int, default=0, help="Number of past seasons to extract (last N)")
     parser.add_argument("--season", type=int, default=None,
                         metavar='N',
@@ -1009,4 +1079,4 @@ if __name__ == "__main__":
 
     asyncio.run(main(limit=limit_count, offset=offset, reset=args.reset,
                      num_seasons=args.seasons, all_seasons=args.all_seasons,
-                     target_season=args.season))
+                     target_season=args.season, refresh=args.refresh))

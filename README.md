@@ -131,12 +131,13 @@ python Leo.py --chapter 2   # Betting automation
 python Leo.py --review      # Outcome review (Finished matches)
 python Leo.py --recommend   # Recommendations generation
 python Leo.py --streamer    # Standalone Live Multi-Tasker (Scores/Review/Reports)
-python Leo.py --enrich-leagues            # Extract Flashscore league pages -> SQLite
-python Leo.py --enrich-leagues --limit 5  # Extract first 5 unprocessed leagues
-python Leo.py --enrich-leagues --limit 501-1000 # Range-based enrichment (e.g. 501-1000)
-python Leo.py --enrich-leagues --season 1 # Target ONLY the most recent past season
+python Leo.py --enrich-leagues            # Smart gap scan (only leagues with missing data)
+python Leo.py --enrich-leagues --limit 5  # Gap scan first 5 leagues
+python Leo.py --enrich-leagues --limit 501-1000 # Range-based gap scan
+python Leo.py --enrich-leagues --refresh   # Re-process stale leagues (>7 days old)
+python Leo.py --enrich-leagues --reset     # Full reset: re-enrich ALL leagues
+python Leo.py --enrich-leagues --season 1  # Target ONLY the most recent past season
 python Leo.py --enrich-leagues --seasons 2 # Extract last 2 seasons per league
-python Leo.py --enrich-leagues --reset     # Reset all leagues and re-enrich
 python Leo.py --train-rl               # Chronological RL model training
 python Leo.py --help                    # Comprehensive CLI command catalog
 ```
