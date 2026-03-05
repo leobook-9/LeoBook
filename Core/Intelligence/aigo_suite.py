@@ -45,12 +45,23 @@ class AIGOSuite:
 
                 last_exception = None
                 
+                # Errors that indicate a dead browser — AIGO cannot heal these
+                CRASH_PATTERNS = ('page crashed', 'target crashed', 'target closed',
+                                  'browser has been closed', 'context or browser has been closed')
+
                 # 1. Standard Retry Loop
                 for attempt in range(max_retries + 1):
                     try:
                         return await func(*args, **kwargs)
                     except Exception as e:
                         last_exception = e
+                        err_lower = str(e).lower()
+                        
+                        # Short-circuit on browser crashes — no retries, no healing
+                        if any(pat in err_lower for pat in CRASH_PATTERNS):
+                            print(f"    [AIGO] Browser/page crashed — skipping retries & healing (not a selector issue)")
+                            raise
+                        
                         if attempt < max_retries:
                             print(f"    [AIGO Retry] Attempt {attempt+1}/{max_retries+1} failed: {e}. Retrying in {delay}s...")
                             await asyncio.sleep(delay)
