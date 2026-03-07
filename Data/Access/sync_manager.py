@@ -299,6 +299,7 @@ class SyncManager:
         self._set_watermark(remote_table, datetime.utcnow().isoformat())
 
     async def _bootstrap_from_remote(self, local_table: str, remote_table: str, key_field: str) -> int:
+        """Legacy bootstrap — used only for empty-local startup fallback."""
         total_pulled = 0
         batch_size = 1000
         offset = 0
@@ -310,28 +311,7 @@ class SyncManager:
                 rows = res.data
                 if not rows:
                     break
-                table_cols = [c[1] for c in self.conn.execute(
-                    f"PRAGMA table_info({local_table})"
-                ).fetchall()]
-                for row in rows:
-                    if 'over_2.5' in row:
-                        row['over_2_5'] = row.pop('over_2.5')
-                    filtered = {k: v for k, v in row.items() if k in table_cols and v is not None}
-                    if not filtered or key_field not in filtered:
-                        continue
-                    cols = list(filtered.keys())
-                    placeholders = ", ".join([f":{c}" for c in cols])
-                    col_str = ", ".join(cols)
-                    updates = ", ".join([f"{c} = excluded.{c}" for c in cols if c != key_field])
-                    try:
-                        self.conn.execute(
-                            f"INSERT INTO {local_table} ({col_str}) VALUES ({placeholders}) "
-                            f"ON CONFLICT({key_field}) DO UPDATE SET {updates}",
-                            filtered,
-                        )
-                    except Exception as e:
-                        logger.warning(f"      [Bootstrap] Row insert failed: {e}")
-                self.conn.commit()
+                self._upsert_rows_to_sqlite(local_table, key_field, rows)
                 total_pulled += len(rows)
                 if len(rows) < batch_size:
                     break
@@ -350,6 +330,102 @@ class SyncManager:
         if total_pulled > 0:
             logger.info(f"    [BOOTSTRAP] Pulled {total_pulled} rows into {local_table}.")
         return total_pulled
+
+    async def batch_pull(self, table_key: str) -> int:
+        """Force full pull from Supabase with 5000-row batches and tqdm progress — mirrors batch_upsert."""
+        conf = TABLE_CONFIG.get(table_key)
+        if not conf or not self.supabase:
+            return 0
+
+        local_table = conf['local_table']
+        remote_table = conf['remote_table']
+        key_field = conf['key']
+
+        # Get remote count first
+        try:
+            count_res = self.supabase.table(remote_table).select("*", count="exact").limit(0).execute()
+            remote_count = count_res.count or 0
+        except Exception:
+            remote_count = 0
+
+        if remote_count == 0:
+            print(f"   [{remote_table}] [OK] Remote empty -- nothing to pull")
+            return 0
+
+        print(f"   [{remote_table}] FORCE FULL PULL -- {remote_count:,} rows (from Supabase)")
+        print(f"   [{remote_table}] Pulling {remote_count:,} rows to local SQLite...")
+
+        total_pulled = 0
+        api_batch_size = 15000
+        offset = 0
+        disable_pbar = not logger.isEnabledFor(logging.INFO)
+        pbar = tqdm(total=remote_count, desc=f"    Pulling {remote_table}", unit="row", disable=disable_pbar)
+
+        try:
+            while offset < remote_count:
+                try:
+                    res = self.supabase.table(remote_table).select("*").order(
+                        key_field, desc=False
+                    ).range(offset, offset + api_batch_size - 1).execute()
+                    rows = res.data
+                    if not rows:
+                        break
+
+                    self._upsert_rows_to_sqlite(local_table, key_field, rows)
+                    total_pulled += len(rows)
+                    pbar.update(len(rows))
+
+                    if len(rows) < api_batch_size:
+                        break
+                    offset += api_batch_size
+                except Exception as batch_err:
+                    err_str = str(batch_err)
+                    if 'PGRST205' in err_str or 'Could not find the table' in err_str:
+                        logger.info(f"    [AUTO] Table '{remote_table}' missing -- skipping.")
+                        break
+                    else:
+                        raise batch_err
+
+            pbar.close()
+            logger.info(f"    [SYNC] Pulled {total_pulled:,} rows from {remote_table}.")
+
+            # Set watermark after successful pull
+            self._set_watermark(remote_table, datetime.utcnow().isoformat())
+            return total_pulled
+
+        except Exception as e:
+            if 'pbar' in locals() and pbar:
+                pbar.close()
+            print(f"    [x] Pull failed for {remote_table}: {e}")
+            logger.error(f"    [x] Pull failed: {e}")
+            return 0
+
+    def _upsert_rows_to_sqlite(self, local_table: str, key_field: str, rows: list):
+        """Bulk upsert rows from Supabase into local SQLite."""
+        if not rows:
+            return
+        table_cols = [c[1] for c in self.conn.execute(
+            f"PRAGMA table_info({local_table})"
+        ).fetchall()]
+        for row in rows:
+            if 'over_2.5' in row:
+                row['over_2_5'] = row.pop('over_2.5')
+            filtered = {k: v for k, v in row.items() if k in table_cols and v is not None}
+            if not filtered or key_field not in filtered:
+                continue
+            cols = list(filtered.keys())
+            placeholders = ", ".join([f":{c}" for c in cols])
+            col_str = ", ".join(cols)
+            updates = ", ".join([f"{c} = excluded.{c}" for c in cols if c != key_field])
+            try:
+                self.conn.execute(
+                    f"INSERT INTO {local_table} ({col_str}) VALUES ({placeholders}) "
+                    f"ON CONFLICT({key_field}) DO UPDATE SET {updates}",
+                    filtered,
+                )
+            except Exception as e:
+                logger.warning(f"      [Pull] Row insert failed: {e}")
+        self.conn.commit()
 
     async def batch_upsert(self, table_key: str, data: List[Dict[str, Any]]) -> int:
         """Upsert a batch of data to Supabase with strict cleaning (pandas vectorized)."""
