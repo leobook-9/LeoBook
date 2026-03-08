@@ -280,6 +280,7 @@ async def run_odds_harvesting(playwright: Playwright):
                         first_date,
                         target_league_name=league_name,
                         fb_url=fb_url,
+                        expected_count=len(fs_fixtures),
                     )
 
                     if not all_page_matches:
