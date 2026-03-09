@@ -517,7 +517,7 @@ class SyncManager:
             return 0
 
         try:
-            api_batch_size = 5000
+            api_batch_size = 15000
             disable_pbar = not logger.isEnabledFor(logging.INFO)
             pbar = tqdm(total=len(deduped), desc=f"    Pushing {remote_table}", unit="row", disable=disable_pbar)
             for i in range(0, len(deduped), api_batch_size):
