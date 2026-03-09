@@ -117,3 +117,54 @@ class EnsembleEngine:
             "path": path,
             "weights": {"W_symbolic": w_s, "W_neural": w_n}
         }
+
+
+# ── 30-dim RL output → structured recommendation ─────────────
+
+def rl_action_to_recommendation(
+    action_idx: int,
+    model_probs: list,
+    live_odds: Optional[Dict[str, float]] = None,
+) -> Optional[Dict]:
+    """
+    Convert 30-dim RL output to a structured recommendation.
+    Applies stairway gate with live odds if available.
+    Returns None if action is no_bet or fails gate.
+    """
+    from Core.Intelligence.rl.market_space import (
+        ACTIONS, N_ACTIONS, stairway_gate, SYNTHETIC_ODDS
+    )
+
+    if action_idx >= N_ACTIONS:
+        return None
+
+    action = ACTIONS[action_idx]
+    key    = action["key"]
+
+    if key == "no_bet":
+        return None
+
+    model_prob = model_probs[action_idx] if action_idx < len(model_probs) else 0.0
+    live_odds_val = (live_odds or {}).get(key)
+    fair_odds_val = SYNTHETIC_ODDS.get(key)
+
+    bettable, reason = stairway_gate(key, live_odds_val, model_prob)
+    if not bettable:
+        return None
+
+    odds_to_use = live_odds_val or fair_odds_val or 0.0
+    ev = (model_prob * odds_to_use) - 1.0 if odds_to_use > 0 else None
+
+    return {
+        "market_key":   key,
+        "market_name":  action["market"],
+        "outcome":      action["outcome"],
+        "line":         action["line"],
+        "market_id":    action["market_id"],
+        "model_prob":   round(model_prob, 4),
+        "live_odds":    live_odds_val,
+        "fair_odds":    fair_odds_val,
+        "is_value_bet": (ev is not None and ev > 0),
+        "ev":           round(ev, 4) if ev is not None else None,
+        "likelihood_pct": action["likelihood"],
+    }

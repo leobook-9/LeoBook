@@ -11,6 +11,11 @@ Predicts goal distributions and expected goals (xG) for teams.
 from typing import List, Dict, Any
 from collections import Counter
 
+# ── xG Multipliers (single source of truth) ────────────────
+# Imported by feature_encoder.py to avoid constant drift.
+HOME_XG_MULTIPLIER: float = 1.20   # Boost for playing at home
+AWAY_XG_MULTIPLIER: float = 0.82   # Penalty for playing away
+
 
 class GoalPredictor:
     """Predicts goal distributions and expected goals for team analysis"""
@@ -45,10 +50,10 @@ class GoalPredictor:
             # Apply home/away adjustment
             if is_home_game and not is_home_match:
                 # Team playing at home but this was an away match - boost goals
-                goals_for = int(goals_for * 1.25)
+                goals_for = int(goals_for * HOME_XG_MULTIPLIER)
             elif not is_home_game and is_home_match:
                 # Team playing away but this was a home match - reduce goals
-                goals_for = int(goals_for * 0.80)
+                goals_for = int(goals_for * AWAY_XG_MULTIPLIER)
 
             scored.append(min(goals_for, 5))  # Cap at 5 for distribution
             conceded.append(min(goals_against, 5))

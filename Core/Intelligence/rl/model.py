@@ -14,6 +14,7 @@ Same team produces different behaviour in different competitions.
 import torch
 import torch.nn as nn
 from typing import Dict, Optional, Tuple
+from .market_space import ACTIONS, N_ACTIONS
 
 
 class LeagueAdapter(nn.Module):
@@ -73,28 +74,19 @@ class LeoBookRLModel(nn.Module):
         FeatureEncoder (192-dim) → SharedTrunk (192→256→256→128)
         → LeagueAdapter (LoRA rank=16)
         → ConditionedTeamAdapter (league-conditioned, LoRA rank=8)
-        → PolicyHead (8-dim action distribution)
+        → PolicyHead (30-dim action distribution)
         → ValueHead (scalar EV)
         → StakeHead (Kelly fraction 0-5%)
 
-    Policy actions (8 dims):
-        [0] Home Win   [1] Draw   [2] Away Win
-        [3] Over 2.5   [4] Under 2.5
-        [5] BTTS Yes   [6] BTTS No
-        [7] No Bet (abstain)
+    Policy actions (30 dims) — see market_space.py ACTIONS for full list.
     """
 
-    NUM_ACTIONS = 8
-    ACTION_NAMES = [
-        "home_win", "draw", "away_win",
-        "over_2.5", "under_2.5",
-        "btts_yes", "btts_no",
-        "no_bet",
-    ]
+    NUM_ACTIONS = N_ACTIONS  # 30 — from market_space.py
+    ACTION_NAMES = [a["key"] for a in ACTIONS]
 
     def __init__(
         self,
-        feature_dim: int = 200,
+        feature_dim: int = 222,
         hidden_dim: int = 256,
         trunk_out_dim: int = 128,
         league_emb_dim: int = 32,

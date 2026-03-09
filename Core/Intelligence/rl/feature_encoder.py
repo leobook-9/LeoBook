@@ -16,7 +16,7 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
-FEATURE_DIM = 200  # Fixed feature vector size (192 base + 8 market priors)
+FEATURE_DIM = 222  # Fixed feature vector size (192 base + 30 market priors)
 
 # Recency decay: match at index 0 (most recent) = weight 1.0, index 9 = weight ~0.37
 _RECENCY_WEIGHTS = [math.exp(-0.1 * i) for i in range(10)]
@@ -84,7 +84,7 @@ class FeatureEncoder:
         # --- 9. League Metadata (4 floats) ---
         features.extend(FeatureEncoder._encode_league_meta(league_meta))
 
-        # --- 10. Market Likelihood Priors (8 floats) ---
+        # --- 10. Market Likelihood Priors (30 floats) ---
         features.extend(FeatureEncoder._encode_market_likelihoods())
 
         # --- 11. Padding to FEATURE_DIM ---
@@ -118,11 +118,12 @@ class FeatureEncoder:
             is_home_match = m.get("home", "") == team_name
             scored = gf if is_home_match else ga
 
-            # Home/away adjustment
+            # Home/away adjustment (constants from goal_predictor.py)
+            from Core.Intelligence.goal_predictor import HOME_XG_MULTIPLIER, AWAY_XG_MULTIPLIER
             if is_home and not is_home_match:
-                scored = scored * 1.15  # Boost for playing at home
+                scored = scored * HOME_XG_MULTIPLIER  # Boost for playing at home
             elif not is_home and is_home_match:
-                scored = scored * 0.85  # Penalty for playing away
+                scored = scored * AWAY_XG_MULTIPLIER  # Penalty for playing away
 
             goals.append(scored)
 
@@ -333,9 +334,8 @@ class FeatureEncoder:
 
     @staticmethod
     def _encode_market_likelihoods() -> List[float]:
-        """Encode base market likelihoods for all 8 RL actions (8 floats).
+        """Encode base market likelihoods for all 30 RL actions (30 floats).
         Gives the model calibrated priors rather than learning base rates from scratch.
         """
-        from .trainer import get_action_likelihood
-        return [get_action_likelihood(i) / 100.0 if get_action_likelihood(i) > 1 else get_action_likelihood(i)
-                for i in range(8)]
+        from .market_space import ACTIONS
+        return [a["likelihood"] / 100.0 for a in ACTIONS]

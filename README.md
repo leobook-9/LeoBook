@@ -3,7 +3,7 @@
 **Developer**: Materialless LLC
 **Chief Engineer**: Emenike Chinenye James
 **Powered by**: Multi-Key Gemini Rotation (25+ Keys, 6 Models) · xAI Grok API (Optional)
-**Architecture**: Autonomous High-Velocity Architecture v7.3 (Supervisor-Worker + Neuro-Symbolic Ensemble + Data Quality v7.1)
+**Architecture**: 3-Phase RL "Stairway Engine" v8.0 (30-dim Action Space + Poisson Grounding + Chapter 1 v9.0)
 
 ---
 
@@ -34,10 +34,10 @@ Leo.py (Orchestrator)
 │   ├── P1: Quantity & ID Gate (O(1) lookup)
 │   ├── P2: History & Quality Gate (O(1) lookup)
 │   └── P3: AI Readiness Gate (O(1) lookup)
-├── Chapter 1 (Prediction Pipeline):
-│   ├── Ch1 P1: URL Resolution & Odds Harvesting
-│   ├── Ch1 P2: Predictions (Neuro-Symbolic Ensemble: Rule + RL)
-│   └── Ch1 P3: Recommendations & Final Chapter Sync
+├── Chapter 1 (Prediction Pipeline v9.0):
+│   ├── Ch1 P1: URL Resolution & Direct Odds Harvesting (v9.0 stable)
+│   ├── Ch1 P2: Predictions (30-dim Stairway Engine: Rule + Poisson RL)
+│   └── Ch1 P3: Recommendations & Final Chapter Sync (Odds 1.20–4.00)
 ├── Chapter 2 (Betting Automation):
 │   ├── Ch2 P1: Automated Booking
 │   └── Ch2 P2: Funds & Withdrawal Check
@@ -50,7 +50,7 @@ Leo.py (Orchestrator)
 - **Data Readiness Gates**: Automated pre-flight checks with **Auto-Remediation** (30-minute timeout) — if leagues, historical seasons, or RL adapters are missing, Leo.py triggers the relevant enrichment/training scripts automatically. If remediation times out, the system proceeds with available data.
 - **Standings VIEW**: High-performance standings computed directly from the `schedules` table via Postgres UNION ALL views. Zero storage, always fresh.
 - **Data Leak Guard**: Max 1 prediction per team per week. This is NOT a frequency cap — it prevents the model from predicting future matches before prerequisite match results are known. Surplus matches are queued by the Scheduler.
-- **Neural RL Engine** (`Core/Intelligence/rl/`): SharedTrunk + LoRA league adapters + league-conditioned team adapters. PPO training with chronological walkthrough and composite rewards.
+- **Neural RL Engine** (`Core/Intelligence/rl/`): v8.0 "Stairway Engine" using a **30-dimensional action space** and **Poisson-grounded imititation learning**. 3-phase PPO training (Imitation → KL Divergence → Adapter Specialization) with phase auto-detection.
 
 ### Core Modules
 

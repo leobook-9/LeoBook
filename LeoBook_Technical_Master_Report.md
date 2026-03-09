@@ -1,4 +1,4 @@
-> **Version**: 7.3.1 · **Last Updated**: 2026-03-09 · **Architecture**: Autonomous High-Velocity Architecture (Supervisor-Worker + Neuro-Symbolic Ensemble + Data Quality v7.1)
+> **Version**: 8.0.0 "Stairway Engine" · **Last Updated**: 2026-03-09 · **Architecture**: 3-Phase RL (Poisson Grounding) + 30-dim Action Space + Chapter 1 v9.0 Direct Harvesting
 
 ## Table of Contents
 
@@ -39,7 +39,7 @@ LeoBook uses **two external data sources** for distinct purposes:
 | Source             | Purpose                                                                    | Method                                              |
 | ------------------ | -------------------------------------------------------------------------- | --------------------------------------------------- |
 | **Flashscore.com** | Match data, scores, team/league metadata, historical fixtures, live scores | Playwright browser automation (headful or headless) |
-| **Football.com**   | Odds harvesting, bet placement (Nigeria/Ghana region)                      | Playwright browser automation (no-login session)    |
+| **Football.com**   | Odds harvesting, bet placement (Nigeria/Ghana region)                      | Direct API-style Harvesting (v9.0 stable)           |
 
 > [!NOTE]
 > Flashscore is used for data extraction only — no bets are placed there. Football.com is used exclusively for Nigeria/Ghana-region odds and bet placement. The separation is intentional: Flashscore has globally comprehensive match data; Football.com has the target betting platform.
@@ -64,18 +64,19 @@ LeoBook uses **two external data sources** for distinct purposes:
 | Directory               | Files                                                                                                                                       | Purpose                                                                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `Core/Intelligence/`    | `rule_engine.py`, `learning_engine.py`, `rule_engine_manager.py`, `aigo_engine.py`, `aigo_suite.py`, **`ensemble.py`**                      | AI engine, AIGO self-healing, adaptive learning, **Neuro-Symbolic Ensemble**                                                            |
-| `Core/Intelligence/rl/` | `trainer.py`, `inference.py`, `model.py`                                                                                                    | Neural RL engine — SharedTrunk + LoRA adapters (see [LoRA Lifecycle](#lora-adapter-lifecycle))                                          |
+| `Core/Intelligence/rl/` | `trainer.py`, `inference.py`, `model.py`, **`market_space.py`**                                                                             | Neural RL engine — 30-dim Multi-Action Space + Phased Training (see [Phased RL Lifecycle](#phased-rl-lifecyle))                         |
 | `Core/System/`          | **`supervisor.py`**, **`worker_base.py`**, **`pipeline_workers.py`**, **`data_readiness.py`**, **`data_quality.py`**, **`gap_resolver.py`** | **Supervisor orchestrator**, **BaseWorker class**, **Chapter Workers**, **Readiness Gates**, **Data Quality Scanner**, **Gap Resolver** |
 | `Core/Utils/`           | `constants.py`                                                                                                                              | Shared constants including `now_ng` (see [Timezone](#timezone-anchor-now_ng))                                                           |
 
-#### LoRA Adapter Lifecycle
+#### Phased RL Lifecycle (v8.0 "Stairway Engine")
 
-The RL model uses a **SharedTrunk + LoRA adapter** architecture:
+The RL model uses a **30-dimensional action space** (defined in `market_space.py`) with a phased training lifecycle:
 
-- **Cold-Start**: New leagues/teams get a generic adapter initialized with the shared trunk's weights. No historical performance data is required — the model defaults to conservative predictions.
-- **Fine-Tune Threshold**: After 50+ matches are recorded for a league or team, the adapter becomes eligible for fine-tuning via `RLTrainer.train_from_fixtures()`.
-- **Registry**: `AdapterRegistry` tracks all known leagues/teams and their match counts. Saved to `Data/Store/models/adapter_registry.json`.
-- **Training**: Chronological walk-through (day-by-day), using only data available before each match date. Future dates are excluded. Training produces per-match PPO updates with composite rewards.
+- **Phase 1 (Imitation Learning)**: Bootstraps the model using **Poisson-grounded labels** derived from xG metrics (1.20 home / 0.82 away multiplier). Ensures basic sports logic before RL rewards take over.
+- **Phase 2 (Value Learning)**: Introduces KL Divergence penalties against the Poisson expert and real money rewards (PPO). Activates once >100 odds rows are harvested.
+- **Phase 3 (Adapter Specialization)**: Freezes the SharedTrunk and fine-tunes league-specific adapters. Activates once >500 matches are recorded for a league.
+- **Registry**: `AdapterRegistry` tracks all known leagues/teams. Saved to `Data/Store/models/adapter_registry.json`.
+- **Inference**: High-velocity prediction (30 actions) gated by the **Stairway Gate** (1.20 ≤ odds ≤ 4.00). Returns EV-weighted recommendations.
 
 #### Timezone Anchor: `now_ng`
 
@@ -173,12 +174,12 @@ Leo.py orchestrates the cycle with autonomous task management:
 21. **Prologue (Data Readiness Gates)**:
     - **P1: Quantity & ID Gate**: Leagues ≥ 90% coverage AND teams ≥ 3 per processed league. Validates IDs. O(1) lookup via `readiness_cache`.
     - **P2: History & Quality Gate**: Verify 2+ distinct seasons. Logic: pass if 0 critical gaps AND 0 completed season mismatches. **ACTIVE seasons ignored.** 
-    - **P3: AI Gate**: RL base model + league adapters exist.
+    - **P3: AI Gate**: RL base model + league adapters exist. **Phase Auto-Detection** checks `match_odds` and `fixtures` counts to unlock Phase 2/3.
     - *All gates use a 30-minute auto-remediation timeout. If they fail, they return `NOT READY` and block the pipeline until auto-remediation or manual fix.*
 3. **Chapter 1: Prediction Pipeline**:
-    - **P1**: URL Resolution & Odds Harvesting from Football.com (no sync).
-    - **P2**: Predictions (**Neuro-Symbolic Ensemble**: Rule Engine + RL). **Data Leak Guard**: Max 1 prediction per team per week. 
-    - **P3**: Final Chapter Sync (push-only watermark delta) & Recommendation Generation.
+    - **P1**: **URL Resolution & Direct Odds Harvesting** (v9.0 stable, 181 page loads vs 1532 fixtures).
+    - **P2**: Predictions (**30-dim Stairway Engine**). **Data Leak Guard**: Max 1 prediction per team per week. 
+    - **P3**: Final Chapter Sync (push-only watermark delta) & **EV-Positive Recommendation** generation (Odds 1.20–4.00).
 4. **Chapter 2: Betting & Funds**:
     - **P1**: Automated Booking on Football.com (see [Safety Guardrails](#6-bet-safety-guardrails)).
     - **P2**: Funds balance + withdrawal check.
@@ -272,12 +273,13 @@ flowchart LR
 
 ### Current State
 
-| Metric                   | Value             | Notes                                                               |
-| ------------------------ | ----------------- | ------------------------------------------------------------------- |
-| RL Training Accuracy     | Pending retrain   | Previous run had tensor shape bug (now fixed). Retraining required. |
-| Rule Engine Accuracy     | Untested at scale | Individual rule components work; aggregate accuracy unknown.        |
-| Calibration              | Unmeasured        | Does a 38% confidence prediction win 38% of the time? Unknown.      |
-| Per-Step Win Probability | Unmeasured        | The foundational number for Project Stairway viability.             |
+| Metric                   | Value             | Notes                                                        |
+| ------------------------ | ----------------- | ------------------------------------------------------------ |
+| Action Space             | 30 Actions        | Expanded from 8 in v8.0 (1X2, DC, OU, BTTS)                  |
+| RL Training Accuracy     | Phase 1 Stable    | Poisson expert grounding provides robust base for imitation. |
+| Rule Engine Accuracy     | Untested at scale | Individual rule components work; aggregate accuracy unknown. |
+| Calibration              | 3-Phase PPO       | v8.0 introduces KL divergence for stable calibration.        |
+| Per-Step Win Probability | Unmeasured        | The foundational number for Project Stairway viability.      |
 
 ### Open Quests (To Be Answered by Pipeline Testing)
 
@@ -349,17 +351,13 @@ These questions will be answered by data, not assumption.
 
 ---
 
-## Appendix: March 9, 2026 Updates (v7.3.1)
+### RL Overhaul v8.0 "Stairway Engine" (March 9, 2026)
+- **30-Dimension Action Space**: Full coverage for 1X2, Double Chance, Over/Under (1.5, 2.5, 3.5), and BTTS.
+- **Poisson Expert Signal**: Phase 1 training now uses a physics-informed Poisson grounding (derived from xG) for stable imitation learning.
+- **Phase Auto-Detection**: ML pipeline automatically transitions from Phase 1 (Imitation) → Phase 2 (PPO + KL) → Phase 3 (Specialization) based on data density.
+- **Stairway Gate Implementation**: Hard enforcement of 1.20–4.00 odds range and EV-positive checks in `ensemble.py`.
+- **xG Multiplier Alignment**: Unified 1.20 (Home) / 0.82 (Away) multipliers across `goal_predictor.py` and `feature_encoder.py`.
+- **Chapter 1 v9.0 Stable**: Direct harvesting engine refined; concurrent processing capped at 2 in Codespaces to prevent memory exhaustion.
 
-### Stability Overhaul (Extractor)
-- **Hydration Polling**: `_activate_and_wait_for_matches` now polls for `expected_count` of match cards instead of exiting on the first card. This fixes the "partial hydration" issue where only 1 fixture would be extracted for a 10-fixture league.
-- **Per-Card Date Extraction**: Extracting dates from the DOM for each individual card resolves the "all-or-nothing" date filter failure for leagues spanning multiple days.
-- **Syntax Warning Fix**: Resolved regex escape sequence warnings in `extractor.py`.
-
-### SearchDict Optimization
-- **Batch Enrichment**: SearchDict now runs as a single one-shot batch call per session instead of per-fixture.
-- **Enrichment Locking**: Implemented an async lock to prevent duplicate concurrent LLM calls for the same teams.
-- **Team ID Capture**: Football.com matches now explicitly carry FS team IDs to ensure accurate batch enrichment mapping.
-
-*Last updated: March 9, 2026 (v7.3.1 — March 9 Stability Fixes)*
+*Last updated: March 9, 2026 (v8.0.0 — March 9 RL Overhaul)*
 *LeoBook Engineering Team — Materialless LLC*

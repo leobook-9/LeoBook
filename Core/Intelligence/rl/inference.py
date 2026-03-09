@@ -17,6 +17,7 @@ from pathlib import Path
 from .model import LeoBookRLModel
 from .feature_encoder import FeatureEncoder
 from .adapter_registry import AdapterRegistry
+from .market_space import ACTIONS, N_ACTIONS
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 MODELS_DIR = PROJECT_ROOT / "Data" / "Store" / "models"
@@ -117,7 +118,7 @@ class RLPredictor:
             predicted_action = action_probs.argmax().item()
             confidence_score = action_probs[predicted_action].item()
 
-        action_name = LeoBookRLModel.ACTION_NAMES[predicted_action]
+        action_name = ACTIONS[predicted_action]["key"]
         ev = value.item()
         kelly = stake.item() * 0.05  # Scale to 0-5%
 
@@ -161,10 +162,10 @@ class RLPredictor:
             f"EV: {ev:.3f}, Kelly: {kelly*100:.1f}%",
         ]
 
-        # 1X2 probabilities for downstream
-        p_home = action_probs[0].item()
-        p_draw = action_probs[1].item()
-        p_away = action_probs[2].item()
+        # 1X2 probabilities for downstream (indices: 14=home_win, 23=draw, 22=away_win)
+        p_home = action_probs[14].item()
+        p_draw = action_probs[23].item()
+        p_away = action_probs[22].item()
 
         return {
             "market_prediction": prediction_text,
@@ -176,8 +177,8 @@ class RLPredictor:
             "reason": reasoning,
             "xg_home": round(home_xg, 2),
             "xg_away": round(away_xg, 2),
-            "btts": "YES" if action_probs[5].item() > action_probs[6].item() else "NO",
-            "over_2.5": "YES" if action_probs[3].item() > action_probs[4].item() else "NO",
+            "btts": "YES" if action_probs[11].item() > action_probs[13].item() else "NO",
+            "over_2.5": "YES" if action_probs[8].item() > action_probs[12].item() else "NO",
             "best_score": "1-0" if p_home > max(p_draw, p_away) else "0-1" if p_away > p_draw else "1-1",
             "top_scores": [],
             "home_tags": [],
@@ -190,10 +191,10 @@ class RLPredictor:
             "home_form_n": len(home_form),
             "away_form_n": len(away_form),
             "total_xg": round(home_xg + away_xg, 2),
-            # RL-specific fields
+            # RL-specific fields (30-dim)
             "rl_action_probs": {
-                name: round(action_probs[i].item(), 4)
-                for i, name in enumerate(LeoBookRLModel.ACTION_NAMES)
+                ACTIONS[i]["key"]: round(action_probs[i].item(), 4)
+                for i in range(N_ACTIONS)
             },
             "rl_expected_value": round(ev, 4),
             "rl_kelly_fraction": round(kelly, 4),
@@ -205,33 +206,32 @@ class RLPredictor:
 
     @staticmethod
     def _action_to_prediction_text(action: str, home: str, away: str) -> str:
-        """Convert RL action to human-readable prediction text."""
-        mapping = {
-            "home_win": f"{home} to Win",
-            "draw": "Draw",
-            "away_win": f"{away} to Win",
-            "over_2.5": "Over 2.5 Goals",
-            "under_2.5": "Under 2.5 Goals",
-            "btts_yes": "Both Teams to Score - Yes",
-            "btts_no": "Both Teams to Score - No",
-            "no_bet": "No Bet",
-        }
-        return mapping.get(action, action)
+        """Convert RL action key to human-readable prediction text."""
+        # Find the action in ACTIONS list
+        for a in ACTIONS:
+            if a["key"] == action:
+                market = a["market"]
+                outcome = a["outcome"]
+                line = a["line"]
+                if action == "home_win":
+                    return f"{home} to Win"
+                elif action == "away_win":
+                    return f"{away} to Win"
+                elif action == "draw":
+                    return "Draw"
+                elif line:
+                    return f"{market} {outcome} {line}"
+                else:
+                    return f"{market} - {outcome}"
+        return action
 
     @staticmethod
     def _action_to_market_type(action: str) -> str:
-        """Convert RL action to market type string."""
-        mapping = {
-            "home_win": "1X2",
-            "draw": "1X2",
-            "away_win": "1X2",
-            "over_2.5": "Over/Under",
-            "under_2.5": "Over/Under",
-            "btts_yes": "BTTS",
-            "btts_no": "BTTS",
-            "no_bet": "ABSTAIN",
-        }
-        return mapping.get(action, "1X2")
+        """Convert RL action key to market type string."""
+        for a in ACTIONS:
+            if a["key"] == action:
+                return a["market"]
+        return "Unknown"
 
     @staticmethod
     def is_available() -> bool:

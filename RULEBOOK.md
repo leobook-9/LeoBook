@@ -54,7 +54,7 @@ Leo.py operates via three sequential gates to ensure data integrity:
 
 **Auto-Remediation**: If a gate fails, Leo.py triggers the relevant enrichment or training script automatically (`auto_remediate`) with a **30-minute timeout**. If remediation exceeds the budget, the system logs a warning and proceeds with available data. The pipeline is never blocked indefinitely by auto-remediation.
 
-### 2.4 Pipeline Structure (v7.0)
+### 2.4 Pipeline Structure (v8.0)
 
 ```
 Startup Sync: Push-only (local → Supabase, auto-bootstrap if empty)
@@ -62,16 +62,16 @@ Task Scheduler: Execute pending tasks (Weekly Enrichment, predictions)
 Prologue (Data Gates):
     P1: League/Team Thresholds (90% / 5 teams)
     P2: Historical Data Check (2+ Seasons)
-    P3: AI RL Adapter Readiness
+    P3: AI RL Adapter Readiness (Phase Auto-Detection)
 Chapter 1:
-    P1: URL Resolution & Odds Harvesting (Football.com, no login)
-    P2: Prediction Pipeline (Pure DB — Rule Engine + RL Ensemble, no browser)
+    P1: URL Resolution & Odds Harvesting (v9.0 — Direct Harvesting, no login)
+    P2: Prediction Pipeline (30-dim Stairway Engine — Rule Engine + Poisson RL)
         - DATA LEAK GUARD: Max 1 prediction per team per week.
           This prevents the model from using future match data to predict
           earlier matches. A team's next match can only be predicted once
           their most recent match result is known.
         - Surplus matches are queued as 'day_before_predict' tasks.
-    P3: Final Recommendations & Sync
+    P3: Final Recommendations & Sync (Stairway Gate: 1.20–4.00 odds)
 Chapter 2:
     P1: Automated Booking (Football.com)
     P2: Funds & Withdrawal Check
@@ -149,10 +149,12 @@ Every Python file MUST have this header format:
     - `Priority 5 (NORMAL)`: Missing metadata.
     - `Priority 10 (DEFERRED)`: Old season gaps.
 
-### 2.13 Neuro-Symbolic Ensemble (Intelligence)
+### 2.13 Neuro-Symbolic Ensemble (Intelligence v8.0 "Stairway Engine")
 
-- **Rule**: Predictions MUST combine Rule Engine (Symbolic) and RL (Neural) signals.
-- **Formula**: `Final_Logits = (W_symbolic * Rule_Score) + (W_neural * RL_Score)`.
+- **Rule**: Predictions MUST combine Rule Engine (Symbolic) and RL (Neural) signals over a **30-dimensional action space**.
+- **Action Space**: Defined in `Core/Intelligence/rl/market_space.py` (Single Source of Truth). Includes 1X2, DC, OU (1.5, 2.5, 3.5), BTTS, and no_bet.
+- **Expert Signal**: Phase 1 uses a **Poisson-grounded signal** derived from xG (1.20 home / 0.82 away multiplier) as the ground truth for imitation learning.
+- **Stairway Gate**: Final output must pass the odds gate (1.20 ≤ odds ≤ 4.00) and an EV-positive check before recommendation.
 - **Weights**: Default `W_symbolic=0.7`, `W_neural=0.3`. Overridable per-league in `ensemble_weights.json`.
 - **Symbolic Baseline**: If `RL_Conf < 0.3` or model failure, fallback to `100% Rule Engine`. The system MUST NOT place bets based purely on low-confidence neural signals.
 
@@ -282,5 +284,5 @@ python -c "from Core.System.data_readiness import DataReadinessChecker; print('[
 
 ---
 
-*Last updated: March 7, 2026 (v7.3 — Supervisor-Worker + Neuro-Symbolic Ensemble + Data Quality v7.1)*
+*Last updated: March 9, 2026 (v8.0 — "Stairway Engine" 30-dim RL + Chapter 1 v9.0 + Poisson Expert Signal)*
 *Authored by: LeoBook Engineering Team — Materialless LLC*

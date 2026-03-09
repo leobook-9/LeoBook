@@ -29,6 +29,13 @@ from collections import defaultdict
 from .model import LeoBookRLModel
 from .feature_encoder import FeatureEncoder
 from .adapter_registry import AdapterRegistry
+from .market_space import (
+    ACTIONS, N_ACTIONS, SYNTHETIC_ODDS, STAIRWAY_BETTABLE,
+    compute_poisson_probs, probs_to_tensor_30dim,
+    derive_ground_truth, stairway_gate, check_phase_readiness,
+    PHASE2_MIN_ODDS_ROWS, PHASE2_MIN_DAYS_LIVE,
+    PHASE3_MIN_ODDS_ROWS, PHASE3_MIN_DAYS_LIVE,
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 MODELS_DIR = PROJECT_ROOT / "Data" / "Store" / "models"
@@ -36,53 +43,6 @@ MODELS_DIR = PROJECT_ROOT / "Data" / "Store" / "models"
 # Paths
 BASE_MODEL_PATH = MODELS_DIR / "leobook_base.pth"
 TRAINING_CONFIG_PATH = MODELS_DIR / "training_config.json"
-
-# --- Market Likelihood Priors ---
-_LIKELIHOOD_JSON_PATH = PROJECT_ROOT / "ranked_markets_likelihood_updated_with_team_ou.json"
-_MARKET_LIKELIHOODS = {}  # populated lazily
-
-def _load_market_likelihoods() -> dict:
-    """Load market likelihood JSON once and build action-index lookup."""
-    global _MARKET_LIKELIHOODS
-    if _MARKET_LIKELIHOODS:
-        return _MARKET_LIKELIHOODS
-    try:
-        with open(_LIKELIHOOD_JSON_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for entry in data.get("ranked_market_outcomes", []):
-            key = entry.get("market_outcome", "")
-            _MARKET_LIKELIHOODS[key] = entry.get("likelihood_percent", 50) / 100.0
-    except Exception:
-        pass
-    return _MARKET_LIKELIHOODS
-
-# Map RL action indices to their market likelihood keys
-_ACTION_LIKELIHOOD_KEYS = {
-    0: "1X2 - 1",            # home_win  ~46%
-    1: "1X2 - X",            # draw      ~27%  (not in JSON directly, use default)
-    2: "1X2 - 2",            # away_win  ~27%
-    3: "Over/Under - Over (2.5 line)",   # over_2.5  ~55%
-    4: "Over/Under - Under (2.5 line)",  # under_2.5 ~45%
-    5: "GG/NG - GG",         # btts_yes  ~54%
-    6: "GG/NG - NG",         # btts_no   ~46%
-    7: None,                  # no_bet    N/A
-}
-
-# Default likelihoods for actions not found in JSON
-_ACTION_DEFAULT_LIKELIHOODS = {
-    0: 0.46, 1: 0.27, 2: 0.27,
-    3: 0.55, 4: 0.45,
-    5: 0.54, 6: 0.46,
-    7: 0.0,
-}
-
-def get_action_likelihood(action_idx: int) -> float:
-    """Get historical base likelihood for a given action index."""
-    likelihoods = _load_market_likelihoods()
-    key = _ACTION_LIKELIHOOD_KEYS.get(action_idx)
-    if key and key in likelihoods:
-        return likelihoods[key]
-    return _ACTION_DEFAULT_LIKELIHOODS.get(action_idx, 0.5)
 
 
 class RLTrainer:
@@ -136,101 +96,93 @@ class RLTrainer:
         self._step_count = 0
 
     # -------------------------------------------------------------------
-    # Composite Reward (prediction accuracy is primary)
+    # Reward functions (30-dim action space)
     # -------------------------------------------------------------------
 
     @staticmethod
     def _get_correct_actions(outcome: Dict[str, Any]) -> set:
-        """Map actual outcome to the set of correct action indices."""
-        result = outcome.get("result", "")
+        """Map actual outcome to the set of correct action indices (30-dim)."""
         home_score = outcome.get("home_score", 0)
         away_score = outcome.get("away_score", 0)
-        total_goals = home_score + away_score
-
+        gt = derive_ground_truth(int(home_score), int(away_score))
         correct = set()
-        if result == "home_win":
-            correct.add(0)
-        elif result == "draw":
-            correct.add(1)
-        elif result == "away_win":
-            correct.add(2)
-
-        if total_goals > 2:
-            correct.add(3)  # over_2.5
-        else:
-            correct.add(4)  # under_2.5
-
-        if home_score > 0 and away_score > 0:
-            correct.add(5)  # btts_yes
-        else:
-            correct.add(6)  # btts_no
-
+        for action in ACTIONS:
+            key = action["key"]
+            if gt.get(key) is True:
+                correct.add(action["idx"])
         return correct
 
     @staticmethod
-    def compute_reward(
-        predicted_action: int,
-        actual_outcome: Dict[str, Any],
-        pred_probs: Optional[torch.Tensor] = None,
+    def _compute_phase1_reward(
+        chosen_action_idx: int,
+        home_score: int,
+        away_score: int,
     ) -> float:
         """
-        Composite reward with prediction accuracy as the backbone.
-        Weighted by market rarity (likelihood priors).
+        Phase 1 reward: accuracy-based (no odds data yet).
+        Correct prediction of bettable market = +1.0
+        Correct prediction of non-bettable = +0.3
+        Wrong prediction = -0.5
+        no_bet when good bets existed = -0.2
+        no_bet when all markets low confidence = +0.1
         """
-        result = actual_outcome.get("result", "")
-        home_score = actual_outcome.get("home_score", 0)
-        away_score = actual_outcome.get("away_score", 0)
-        total_goals = home_score + away_score
+        action = ACTIONS[chosen_action_idx]
+        key = action["key"]
+        gt = derive_ground_truth(int(home_score), int(away_score))
 
-        correct_actions = RLTrainer._get_correct_actions(actual_outcome)
-        prediction_correct = 1.0 if predicted_action in correct_actions else -0.5
+        if key == "no_bet":
+            any_bettable_correct = any(
+                gt.get(ACTIONS[i]["key"], False) is True
+                for i in STAIRWAY_BETTABLE
+            )
+            return -0.2 if any_bettable_correct else +0.1
 
-        # --- 2. Calibration (weight: 0.6) ---
-        calibration_score = 0.0
-        if pred_probs is not None:
-            actual_vec = torch.zeros(3)
-            if result == "home_win":
-                actual_vec[0] = 1.0
-            elif result == "draw":
-                actual_vec[1] = 1.0
-            elif result == "away_win":
-                actual_vec[2] = 1.0
+        outcome = gt.get(key)
+        if outcome is None:
+            return 0.0
 
-            brier = ((pred_probs[:3] - actual_vec) ** 2).sum().item()
-            calibration_score = 1.0 - brier
-
-        # --- 3. ROI component (weight: 0.4) ---
-        odds = actual_outcome.get("odds", {})
-        roi_score = 0.0
-        if predicted_action in correct_actions and predicted_action < 3:
-            action_name = LeoBookRLModel.ACTION_NAMES[predicted_action]
-            odd_val = odds.get(action_name, 2.0)
-            roi_score = (odd_val - 1.0) / odd_val
-
-        # --- 4. Abstention bonus/penalty ---
-        if predicted_action == 7:  # no_bet
-            if pred_probs is not None and pred_probs[:3].max().item() < 0.4:
-                prediction_correct = 0.3
-            else:
-                prediction_correct = -0.1
-
-        # --- 5. Market rarity multiplier ---
-        likelihood = get_action_likelihood(predicted_action)
-        if likelihood > 0 and likelihood < 0.20:
-            rarity_mult = 2.0
-        elif likelihood >= 0.50:
-            rarity_mult = 0.5
+        bettable, _ = stairway_gate(key)
+        if outcome is True:
+            return 1.0 if bettable else 0.3
         else:
-            rarity_mult = 1.0
+            return -0.5
 
-        # --- Composite ---
-        raw_reward = (
-            1.0 * prediction_correct
-            + 0.6 * calibration_score
-            + 0.4 * roi_score
-        )
+    @staticmethod
+    def _compute_phase2_reward(
+        chosen_action_idx: int,
+        home_score: int,
+        away_score: int,
+        live_odds: Optional[float] = None,
+        model_prob: Optional[float] = None,
+    ) -> float:
+        """
+        Phase 2 reward: value-based (real odds available).
+        """
+        action = ACTIONS[chosen_action_idx]
+        key = action["key"]
+        gt = derive_ground_truth(int(home_score), int(away_score))
 
-        return raw_reward * rarity_mult
+        if key == "no_bet":
+            any_value_bet_missed = any(
+                gt.get(ACTIONS[i]["key"], False) is True
+                for i in STAIRWAY_BETTABLE
+                if SYNTHETIC_ODDS.get(ACTIONS[i]["key"], 0) >= 1.30
+            )
+            return -0.3 if any_value_bet_missed else +0.1
+
+        bettable, reason = stairway_gate(key, live_odds, model_prob)
+        if not bettable:
+            return -0.1
+
+        outcome = gt.get(key)
+        if outcome is None:
+            return 0.0
+
+        odds = live_odds if live_odds else SYNTHETIC_ODDS.get(key, 1.5)
+        if outcome is True:
+            return odds - 1.0   # profit
+        else:
+            return -1.0          # loss
 
     # -------------------------------------------------------------------
     # Training step (PPO)
@@ -242,53 +194,44 @@ class RLTrainer:
 
     def _get_rule_engine_probs(self, vision_data: Dict[str, Any]) -> torch.Tensor:
         """
-        Runs Rule Engine and builds an 8-dim probability distribution.
-        Action indices from LeoBookRLModel:
-        [0] Home Win   [1] Draw   [2] Away Win
-        [3] Over 2.5   [4] Under 2.5
-        [5] BTTS Yes   [6] BTTS No
-        [7] No Bet
+        Phase 1 expert signal: Poisson probability distribution
+        over 30-dim action space, derived from xG estimates.
+
+        Blends Poisson with Rule Engine weighted voting (40/60)
+        for 1X2 markets. Applies synthetic odds filter to down-
+        weight actions outside the Stairway range.
+
+        Returns: torch.Tensor shape (30,) summing to 1.0
         """
-        from ..rule_engine import RuleEngine
-        analysis = RuleEngine.analyze(vision_data)
-        
-        if analysis.get("type") == "SKIP":
-            probs = torch.zeros(LeoBookRLModel.NUM_ACTIONS)
-            probs[7] = 1.0
-            return probs.to(self.device)
+        # 1. Get xG from vision_data
+        xg_home = float(vision_data.get("xg_home") or
+                        vision_data.get("total_xg", 2.4) * 0.55)
+        xg_away = float(vision_data.get("xg_away") or
+                        vision_data.get("total_xg", 2.4) * 0.45)
 
-        probs = torch.zeros(LeoBookRLModel.NUM_ACTIONS)
-        
-        # 1. 1X2 Probs (60% budget — dominant market)
-        raw = analysis.get("raw_scores", {"home": 0, "draw": 0, "away": 0})
-        scores = torch.tensor([float(raw["home"]), float(raw["draw"]), float(raw["away"])])
-        # If all scores are 0 (no signal), use uniform
-        if scores.sum() == 0:
-            x12_probs = torch.tensor([1/3, 1/3, 1/3]) * 0.6
-        else:
-            x12_probs = torch.softmax(scores / 2.0, dim=0) * 0.6
-        probs[0:3] = x12_probs
+        raw_scores = vision_data.get("raw_scores", None)
 
-        # 2. Over/Under 2.5 (15% budget)
-        o25_label = analysis.get("over_2.5", "50/50")
-        if o25_label == "YES": o25, u25 = 0.8, 0.2
-        elif o25_label == "NO": o25, u25 = 0.2, 0.8
-        else: o25, u25 = 0.5, 0.5
-        probs[3] = o25 * 0.15
-        probs[4] = u25 * 0.15
+        # 2. Compute Poisson probabilities for all 30 markets
+        probs = compute_poisson_probs(xg_home, xg_away, raw_scores)
 
-        # 3. BTTS (15% budget)
-        btts_label = analysis.get("btts", "50/50")
-        if btts_label == "YES": b_yes, b_no = 0.8, 0.2
-        elif btts_label == "NO": b_yes, b_no = 0.2, 0.8
-        else: b_yes, b_no = 0.5, 0.5
-        probs[5] = b_yes * 0.15
-        probs[6] = b_no * 0.15
+        # 3. Apply synthetic stairway weight
+        for action in ACTIONS:
+            key = action["key"]
+            if key == "no_bet":
+                continue
+            bettable, _ = stairway_gate(key)
+            if not bettable:
+                probs[key] *= 0.3
 
-        # 4. No Bet (10% baseline — prevents overconfidence)
-        probs[7] = 0.10
+        # 4. Convert to ordered tensor
+        vec = probs_to_tensor_30dim(probs)
+        tensor = torch.tensor(vec, dtype=torch.float32)
 
-        return (probs / probs.sum()).to(self.device)
+        # 5. Safety: if all near-zero, return uniform
+        if tensor.sum() < 0.1:
+            return torch.ones(N_ACTIONS, dtype=torch.float32).to(self.device) / N_ACTIONS
+
+        return (tensor / tensor.sum()).to(self.device)
 
     def train_step(
         self,
@@ -339,7 +282,15 @@ class RLTrainer:
             action = dist.sample()
             log_prob = dist.log_prob(action)
 
-            reward = self.compute_reward(action.item(), outcome, action_probs.detach().squeeze())
+            h_score = outcome.get("home_score", 0)
+            a_score = outcome.get("away_score", 0)
+            active_phase = getattr(self, 'active_phase', 1)
+
+            if active_phase >= 2:
+                reward = self._compute_phase2_reward(action.item(), h_score, a_score)
+            else:
+                reward = self._compute_phase1_reward(action.item(), h_score, a_score)
+
             reward_tensor = torch.tensor([reward], dtype=torch.float32, device=self.device)
             advantage = reward_tensor - value.squeeze(-1)
 
@@ -394,7 +345,32 @@ class RLTrainer:
         print(f"  RL TRAINING — PHASE {phase} {'(COLD START)' if cold else ''}")
         print("  ============================================================\n")
 
-        if phase == 3:
+        # ── Auto-detect active training phase ──────────────────────
+        phase_status = check_phase_readiness(conn)
+        odds_rows  = phase_status["odds_rows"]
+        days_live  = phase_status["days_live"]
+        phase2_ready = phase_status["phase2_ready"]
+        phase3_ready = phase_status["phase3_ready"]
+
+        if phase3_ready:
+            active_phase = 3
+            print(f"  [RL] Phase 3 AUTO-ACTIVATED: "
+                  f"{odds_rows} odds rows, {days_live} days live.")
+        elif phase2_ready:
+            active_phase = 2
+            print(f"  [RL] Phase 2 AUTO-ACTIVATED: "
+                  f"{odds_rows} odds rows, {days_live} days live.")
+        else:
+            active_phase = 1
+            needed_rows = PHASE2_MIN_ODDS_ROWS - odds_rows
+            needed_days = max(0, PHASE2_MIN_DAYS_LIVE - days_live)
+            print(f"  [RL] Phase 1 active. "
+                  f"Phase 2 needs: {needed_rows} more odds rows, "
+                  f"{needed_days} more days of live data.")
+
+        self.active_phase = active_phase
+
+        if active_phase == 3 or phase == 3:
             print("  [TRAIN] Freezing Shared Trunk... training Adapters only.")
             for param in self.model.trunk.parameters():
                 param.requires_grad = False
@@ -431,6 +407,12 @@ class RLTrainer:
         if resume and latest_path.exists():
             try:
                 ckpt = torch.load(latest_path, map_location=self.device, weights_only=False)
+                # Architecture mismatch guard
+                ckpt_n_actions = ckpt.get("n_actions", 8)
+                if ckpt_n_actions != N_ACTIONS:
+                    print(f"  [RESUME] ✗ Checkpoint is {ckpt_n_actions}-dim but "
+                          f"current model is {N_ACTIONS}-dim. Delete and retrain.")
+                    return
                 self.model.load_state_dict(ckpt["model_state"], strict=False)
                 self.optimizer.load_state_dict(ckpt["optimizer_state"])
                 start_day_idx = ckpt["day"]
@@ -438,7 +420,7 @@ class RLTrainer:
                 total_correct_global = ckpt.get("correct_predictions", 0)
                 print(f"  [RESUME] ✓ Loaded checkpoint from Day {start_day_idx}/{len(all_dates)} ({ckpt.get('match_date', '?')})")
                 print(f"  [RESUME]   Matches so far: {total_matches_global} | Correct: {total_correct_global}")
-                all_dates = all_dates[start_day_idx:]  # Skip completed days
+                all_dates = all_dates[start_day_idx:]
                 if not all_dates:
                     print(f"  [RESUME] All days already completed. Nothing to do.")
                     return
@@ -494,10 +476,10 @@ class RLTrainer:
                 features = FeatureEncoder.encode(vision_data)
                 expert_probs = self._get_rule_engine_probs(vision_data)
                 
-                if phase == 1 and not cold:
+                if active_phase == 1 and not cold:
                     metrics = self.train_step(features, l_idx, h_idx, a_idx, expert_probs=expert_probs)
                 else:
-                    use_kl = (phase == 2)
+                    use_kl = (active_phase == 2)
                     metrics = self.train_step(features, l_idx, h_idx, a_idx, outcome=outcome, expert_probs=expert_probs, use_kl=use_kl)
 
                 day_matches += 1
@@ -512,7 +494,7 @@ class RLTrainer:
                         total_norm += p.grad.data.norm(2).item() ** 2
                 day_grad_norm += total_norm ** 0.5
 
-                # RL Correctness (vs Actual Outcome — all 8 action types)
+                # RL Correctness (vs Actual Outcome — all 30 action types)
                 action_idx = metrics.get("action", torch.argmax(
                     self.model.get_action_probs(features, l_idx, h_idx, a_idx)
                 ).item())
@@ -520,10 +502,11 @@ class RLTrainer:
                 expert_pred_idx = torch.argmax(expert_probs).item()
 
                 if day_idx == 0 and day_matches <= 5:
+                    probs_list = expert_probs.squeeze().detach().cpu().tolist()
                     print(f"      [DEBUG] {h_name} vs {a_name}")
-                    print(f"        Expert probs: {expert_probs.squeeze().detach().cpu().tolist()}")
-                    print(f"        Expert pick: {LeoBookRLModel.ACTION_NAMES[expert_pred_idx]} | RL pick: {LeoBookRLModel.ACTION_NAMES[action_idx]}")
-                    print(f"        Correct actions: {[LeoBookRLModel.ACTION_NAMES[a] for a in correct_actions]}")
+                    print(f"        Expert probs: {[round(p, 3) for p in probs_list]}")
+                    print(f"        Expert pick: {ACTIONS[expert_pred_idx]['key']} | RL pick: {ACTIONS[action_idx]['key']}")
+                    print(f"        Correct actions: {[ACTIONS[a]['key'] for a in correct_actions]}")
                     print(f"        KL: {metrics.get('kl_div', 0.0):.4f} | Imitation loss: {metrics.get('imitation_loss', 0.0):.4f}")
 
                 # Count RL as correct if its action is in the correct set
@@ -540,7 +523,7 @@ class RLTrainer:
                 rule_acc = (day_rule_acc / day_matches) * 100
                 kl = day_kl / day_matches
                 gn = day_grad_norm / day_matches
-                if phase == 1 and not cold:
+                if active_phase == 1 and not cold:
                     il = day_imit_loss / day_matches
                     print(f"  [Day {day_idx+1:2d}/{start_day_idx + len(all_dates)}] Rule Acc: {rule_acc:4.1f}% | RL Acc: {rl_acc:4.1f}% | KL: {kl:5.3f} | ImitLoss: {il:6.4f} | GradNorm: {gn:.4f} | Matches: {day_matches}")
                 else:
@@ -558,13 +541,16 @@ class RLTrainer:
                     "optimizer_state": self.optimizer.state_dict(),
                     "total_matches": total_matches_global,
                     "correct_predictions": total_correct_global,
-                    "phase": phase,
+                    "phase": active_phase,
+                    "n_actions": N_ACTIONS,
+                    "odds_rows_at_save": odds_rows,
+                    "days_live_at_save": days_live,
                 }
-                torch.save(ckpt_data, CHECKPOINT_DIR / f"phase{phase}_day{day_idx+1:03d}.pth")
+                torch.save(ckpt_data, CHECKPOINT_DIR / f"phase{active_phase}_day{day_idx+1:03d}.pth")
                 torch.save(ckpt_data, latest_path)
 
                 # Keep only last 5 daily checkpoints
-                existing = sorted(CHECKPOINT_DIR.glob(f"phase{phase}_day*.pth"))
+                existing = sorted(CHECKPOINT_DIR.glob(f"phase{active_phase}_day*.pth"))
                 while len(existing) > 5:
                     existing[0].unlink()
                     existing = existing[1:]
