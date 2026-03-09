@@ -523,6 +523,47 @@ async def run_utility(args):
         bt._write_report(args.bt_output)
         print(f"  [Backtest] Report written to {args.bt_output}")
 
+    elif args.paper_summary:
+        print("\n  --- LEO: Paper Trading Log Summary ---")
+        from Data.Access.db_helpers import get_paper_trading_summary
+        from Core.Utils.constants import now_ng
+        conn = init_db()
+        summary = get_paper_trading_summary(conn)
+        now_str = now_ng().strftime("%Y-%m-%d %H:%M WAT")
+
+        print(f"\n  {'═' * 50}")
+        print(f"  PAPER TRADING LOG SUMMARY")
+        print(f"  As of: {now_str}")
+        print(f"  {'═' * 50}")
+        print(f"\n  Total trades logged:    {summary['total_trades']}")
+        print(f"  Reviewed (settled):     {summary['reviewed_trades']}")
+        print(f"  Pending outcome:        {summary['pending_review']}")
+        print(f"\n  ACCURACY")
+        print(f"    All trades:           {summary['accuracy']:.1f}%")
+        print(f"    Gated trades only:    {summary['gated_accuracy']:.1f}%")
+        print(f"\n  SIMULATED P&L (NGN)")
+        print(f"    Total P&L:            ₦{summary['total_simulated_pl']:,.2f}")
+        print(f"    ROI:                  {summary['roi']:.1f}%")
+        print(f"    Avg stake:            ₦{summary['avg_stake']:,.0f}")
+
+        # Top 5 markets by count
+        sorted_markets = sorted(
+            summary.get('by_market', {}).items(),
+            key=lambda x: x[1]['count'], reverse=True
+        )[:5]
+        if sorted_markets:
+            print(f"\n  TOP 5 MARKETS (by trade count)")
+            print(f"    {'market_key':<18}| {'trades':>6} | {'accuracy':>8} | {'total_pl':>12}")
+            print(f"    {'─'*18}|{'─'*8}|{'─'*10}|{'─'*14}")
+            for mk, stats in sorted_markets:
+                print(f"    {mk:<18}| {stats['count']:>6} | {stats['accuracy']:>7.1f}% | ₦{stats['total_pl']:>10,.2f}")
+
+        print(f"\n  {'═' * 50}")
+        print(f"  ⚠ SIMULATED RESULTS. No real money was staked.")
+        print(f"  ⚠ P&L uses live odds where available, synthetic")
+        print(f"    odds as fallback. Treat as directional only.")
+        print(f"  {'═' * 50}")
+
 
 # ============================================================
 # DISPATCH — Routes CLI args to the appropriate functions
@@ -624,7 +665,7 @@ if __name__ == "__main__":
                       args.rule_engine, args.streamer,
                       args.assets,
                       args.logos, args.enrich_leagues, args.upgrade_crests,
-                      args.train_rl, args.backtest_rl])
+                      args.train_rl, args.backtest_rl, args.paper_summary])
     is_granular = args.prologue or args.chapter is not None
 
     try:

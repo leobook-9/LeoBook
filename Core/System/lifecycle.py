@@ -241,6 +241,10 @@ Examples:
                         metavar='PATH',
                         help='Path to write backtest report (default: Data/Log/backtest_report.txt)')
 
+    # --- Paper Trading ---
+    parser.add_argument('--paper-summary', action='store_true',
+                        help='Print paper trading log summary')
+
     parser.add_argument('--rule-engine', action='store_true',
                        help='Show default rule engine info (combine with --list, --set-default, --backtest)')
     parser.add_argument('--backtest', action='store_true',

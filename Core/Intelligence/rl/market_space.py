@@ -27,6 +27,17 @@ STAIRWAY_ODDS_MIN: float = 1.20
 STAIRWAY_ODDS_MAX: float = 4.00
 STAIRWAY_MIN_EV:   float = 0.00
 
+# ── Project Stairway stake ladder (NGN) ──────────────────────
+STAIRWAY_STAKES: dict = {
+    1:   1_000,
+    2:   3_000,
+    3:   9_000,
+    4:  27_000,
+    5:  81_000,
+    6: 243_000,
+    7: 729_000,
+}
+
 # ── Phase transition thresholds ──────────────────────────────
 PHASE2_MIN_ODDS_ROWS:    int = 5_000
 PHASE2_MIN_DAYS_LIVE:    int = 30
