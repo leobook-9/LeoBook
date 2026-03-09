@@ -195,26 +195,38 @@ class RLTrainer:
     def _get_rule_engine_probs(self, vision_data: Dict[str, Any]) -> torch.Tensor:
         """
         Phase 1 expert signal: Poisson probability distribution
-        over 30-dim action space, derived from xG estimates.
+        over 30-dim action space, derived from match-specific xG.
 
-        Blends Poisson with Rule Engine weighted voting (40/60)
-        for 1X2 markets. Applies synthetic odds filter to down-
-        weight actions outside the Stairway range.
+        Computes xG from the team's actual form data, then runs
+        Poisson to get per-market probabilities. Blends with
+        RuleEngine raw_scores for 1X2 markets (40/60 weight).
 
         Returns: torch.Tensor shape (30,) summing to 1.0
         """
-        # 1. Get xG from vision_data
-        xg_home = float(vision_data.get("xg_home") or
-                        vision_data.get("total_xg", 2.4) * 0.55)
-        xg_away = float(vision_data.get("xg_away") or
-                        vision_data.get("total_xg", 2.4) * 0.45)
+        # 1. Compute match-specific xG from form data
+        h2h = vision_data.get("h2h_data", {})
+        home_form = [m for m in h2h.get("home_last_10_matches", []) if m][:10]
+        away_form = [m for m in h2h.get("away_last_10_matches", []) if m][:10]
+        home_team = h2h.get("home_team", "")
+        away_team = h2h.get("away_team", "")
 
-        raw_scores = vision_data.get("raw_scores", None)
+        xg_home = FeatureEncoder._compute_xg(home_form, home_team, is_home=True)
+        xg_away = FeatureEncoder._compute_xg(away_form, away_team, is_home=False)
 
-        # 2. Compute Poisson probabilities for all 30 markets
+        # 2. Get Rule Engine raw_scores for 1X2 blending
+        raw_scores = None
+        try:
+            from ..rule_engine import RuleEngine
+            analysis = RuleEngine.analyze(vision_data)
+            if analysis.get("type") != "SKIP":
+                raw_scores = analysis.get("raw_scores")
+        except Exception:
+            pass
+
+        # 3. Compute Poisson probabilities for all 30 markets
         probs = compute_poisson_probs(xg_home, xg_away, raw_scores)
 
-        # 3. Apply synthetic stairway weight
+        # 4. Apply synthetic stairway weight
         for action in ACTIONS:
             key = action["key"]
             if key == "no_bet":
@@ -223,11 +235,11 @@ class RLTrainer:
             if not bettable:
                 probs[key] *= 0.3
 
-        # 4. Convert to ordered tensor
+        # 5. Convert to ordered tensor
         vec = probs_to_tensor_30dim(probs)
         tensor = torch.tensor(vec, dtype=torch.float32)
 
-        # 5. Safety: if all near-zero, return uniform
+        # 6. Safety: if all near-zero, return uniform
         if tensor.sum() < 0.1:
             return torch.ones(N_ACTIONS, dtype=torch.float32).to(self.device) / N_ACTIONS
 
