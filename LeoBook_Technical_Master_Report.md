@@ -1,4 +1,4 @@
-> **Version**: 8.1.0 "Stairway Engine" · **Last Updated**: 2026-03-10 · **Architecture**: 3-Phase RL (Poisson Grounding) + 30-dim Action Space + Chapter 1 v9.0 Direct Harvesting + Safety Guardrails v1.0
+> **Version**: 8.1.0 "Stairway Engine" · **Last Updated**: 2026-03-12 · **Architecture**: 3-Phase RL (Poisson Grounding) + 30-dim Action Space + Chapter 1 v9.0 Direct Harvesting + Safety Guardrails v1.0
 
 ## Table of Contents
 
@@ -7,16 +7,18 @@
 3. [Leo.py — Step-by-Step Execution Flow](#3-leopy--step-by-step-execution-flow)
 4. [Design & UI/UX](#4-design--uiux)
 5. [Data Flow Diagram](#5-data-flow-diagram)
-6. [Bet Safety Guardrails](#6-bet-safety-guardrails)
-7. [Model Performance & Open Quests](#7-model-performance--open-quests)
-8. [Testing Strategy](#8-testing-strategy)
-9. [Observability & Logging](#9-observability--logging)
+6. [Project Stairway — Capital Engine](#6-project-stairway--capital-engine)
+7. [Bet Safety Guardrails](#7-bet-safety-guardrails)
+8. [Model Performance & Open Quests](#8-model-performance--open-quests)
+9. [Testing Strategy](#9-testing-strategy)
+10. [Observability & Logging](#10-observability--logging)
+11. [Changelog](#11-changelog)
 
 ---
 
 ## 1. System Overview
 
-LeoBook is an **autonomous sports prediction and betting system** comprised of two halves:
+**LeoBook v8.0 "Stairway Engine"** is an autonomous sports prediction and betting system built by **Materialless LLC** (owner: Emenike Chinenye James). The core thesis: scan 100–500 daily football matches, identify those with genuine predictive edge, and compound returns through a structured, self-protecting staking system — **Project Stairway**.
 
 | Half                      | Technology                         | Purpose                                                                                                                                  |
 | ------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -28,9 +30,11 @@ LeoBook is an **autonomous sports prediction and betting system** comprised of t
 - **SQLite is the single source of truth.** All data originates in `leobook.db`. Supabase is a **push-only read mirror** — the Flutter app reads from Supabase, but no data flows back from Supabase to SQLite during normal operation.
 - **Push-Only Sync.** `SyncManager` uses watermark-based delta detection. Only rows modified since the last watermark are pushed. Zero reads from Supabase during sync.
 - **One-Time Bootstrap.** If a local SQLite table is empty (fresh install or post-corruption), `_bootstrap_from_remote()` pulls from Supabase once, then the watermark is set to `now()` to resume push-only behavior. The `--pull` CLI command also triggers a full bootstrap.
+- **No Standings Table.** Standings are never stored. They are computed exclusively via `computed_standings()` — a Postgres VIEW in Supabase and a helper function in `league_db.py`.
 - **Supervisor-Worker Pattern.** Leo.py is powered by a `Supervisor` orchestrator that dispatches isolated workers for each chapter, ensuring failure recovery and state persistence.
 - **Data Readiness Gates.** Prologue P1-P3 verify data completeness before predictions. O(1) gate checks are powered by a materialized `readiness_cache` in the database.
-- **Standings** are computed on-the-fly via a Postgres VIEW in Supabase.
+- **`MAX_CONCURRENCY=4`** in root `.env`, **capped at 2 in Codespace** (memory constraint).
+- **`N_ACTIONS=30`** — `market_space.py` is the single source of truth for the action space.
 
 ### Data Extraction Strategy
 
@@ -39,10 +43,21 @@ LeoBook uses **two external data sources** for distinct purposes:
 | Source             | Purpose                                                                    | Method                                              |
 | ------------------ | -------------------------------------------------------------------------- | --------------------------------------------------- |
 | **Flashscore.com** | Match data, scores, team/league metadata, historical fixtures, live scores | Playwright browser automation (headful or headless) |
-| **Football.com**   | Odds harvesting, bet placement (Nigeria/Ghana region)                      | Direct API-style Harvesting (v9.0 stable)           |
+| **Football.com**   | Odds harvesting, bet placement (Nigeria/Ghana region)                      | Direct API-style Harvesting (v9.0 stable) — no-login scraping sessions |
 
 > [!NOTE]
 > Flashscore is used for data extraction only — no bets are placed there. Football.com is used exclusively for Nigeria/Ghana-region odds and bet placement. The separation is intentional: Flashscore has globally comprehensive match data; Football.com has the target betting platform.
+
+### Environment & Infrastructure
+
+| Context | Detail |
+|---------|--------|
+| **Primary dev** | GitHub Codespaces (`https://github.com/Materialless-LLC/LeoBook`, main branch, @emenikecj) |
+| **Local machine** | `C:\Users\Admin\Desktop\ProProjection\LeoBook` — **contaminated**, awaiting git triage |
+| **LLM** | Gemini 2.5 Pro (daily quota constraints apply — key rotation pool active) |
+| **Cloud infra** | Oracle Cloud — in setup, pending user action |
+| **RL Training** | Day **34 of 99** (Phase 1, background process) |
+| **Backtest** | 45-day run (background process) |
 
 ---
 
@@ -64,7 +79,7 @@ LeoBook uses **two external data sources** for distinct purposes:
 | Directory               | Files                                                                                                                                       | Purpose                                                                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `Core/Intelligence/`    | `rule_engine.py`, `learning_engine.py`, `rule_engine_manager.py`, `aigo_engine.py`, `aigo_suite.py`, **`ensemble.py`**                      | AI engine, AIGO self-healing, adaptive learning, **Neuro-Symbolic Ensemble**                                                            |
-| `Core/Intelligence/rl/` | `trainer.py`, `inference.py`, `model.py`, **`market_space.py`**                                                                             | Neural RL engine — 30-dim Multi-Action Space + Phased Training (see [Phased RL Lifecycle](#phased-rl-lifecyle))                         |
+| `Core/Intelligence/rl/` | `trainer.py`, `inference.py`, `model.py`, **`market_space.py`**                                                                             | Neural RL engine — 30-dim Multi-Action Space + Phased Training (see [Phased RL Lifecycle](#phased-rl-lifecycle))                         |
 | `Core/System/`          | **`supervisor.py`**, **`worker_base.py`**, **`pipeline_workers.py`**, **`data_readiness.py`**, **`data_quality.py`**, **`gap_resolver.py`**, **`guardrails.py`** | **Supervisor orchestrator**, **BaseWorker class**, **Chapter Workers**, **Readiness Gates**, **Data Quality Scanner**, **Gap Resolver**, **Bet Safety Guardrails** |
 | `Core/Utils/`           | `constants.py`                                                                                                                              | Shared constants including `now_ng` (see [Timezone](#timezone-anchor-now_ng))                                                           |
 
@@ -72,7 +87,7 @@ LeoBook uses **two external data sources** for distinct purposes:
 
 The RL model uses a **30-dimensional action space** (defined in `market_space.py`) with a phased training lifecycle:
 
-- **Phase 1 (Imitation Learning)**: Bootstraps the model using **Poisson-grounded labels** derived from xG metrics (1.20 home / 0.82 away multiplier). Ensures basic sports logic before RL rewards take over.
+- **Phase 1 (Imitation Learning)** — *Active: Day 34 of 99*: Bootstraps the model using **Poisson-grounded labels** derived from xG metrics (1.20 home / 0.82 away multiplier). Ensures basic sports logic before RL rewards take over.
 - **Phase 2 (Value Learning)**: Introduces KL Divergence penalties against the Poisson expert and real money rewards (PPO). Activates once >100 odds rows are harvested.
 - **Phase 3 (Adapter Specialization)**: Freezes the SharedTrunk and fine-tunes league-specific adapters. Activates once >500 matches are recorded for a league.
 - **Registry**: `AdapterRegistry` tracks all known leagues/teams. Saved to `Data/Store/models/adapter_registry.json`.
@@ -81,8 +96,8 @@ The RL model uses a **30-dimensional action space** (defined in `market_space.py
 #### RL Validation Suite (Backtest & Paper Trading)
 LeoBook employs a dual-validation strategy to ensure model reliability before real capital is deployed:
 
-- **Walk-Forward Backtest Harness** (`backtest.py`):
-    - Implementation of rolling-window training and next-day evaluation.
+- **Walk-Forward Backtest Harness** (`backtest.py`) — *Active: 45-day run in background*:
+    - Rolling-window training and next-day evaluation.
     - Slices history into 90-day training windows to prevent data leakage.
     - Measures accuracy, coverage, synthetic ROI, and calibration quartiles.
 - **Paper Trading Log** (`paper_trades` table):
@@ -105,7 +120,8 @@ LeoBook employs a dual-validation strategy to ensure model reliability before re
 | ---------------------------------------- | ----------------------------------------------------------------- |
 | `Modules/Flashscore/fs_processor.py`     | Per-match H2H + Enrichment + Search Dict                          |
 | `Modules/Flashscore/fs_live_streamer.py` | Isolated live score streaming + outcome review + accuracy reports |
-| `Modules/FootballCom/fb_manager.py`      | Odds harvesting, automated booking                                |
+| `Modules/FootballCom/fb_manager.py`      | Odds harvesting, automated booking — **under active review** for Ch1 P1 |
+| `Modules/FootballCom/match_resolver.py`  | Match identity resolution — **under active review** for Ch1 P1   |
 
 ### 2.4 `Data/` — Persistence Layer
 
@@ -171,10 +187,12 @@ Leo.py supports two modes of operation:
 | `--paper-summary`                    | Display aggregated statistics from the Paper Trading Log                                                                                                             |
 | `--bypass-cache`                     | Force O(N) scan for Prologue gates, skipping materialized cache                                                                                                      |
 | `--set-expected-matches`             | Manually override expected match count for a season                                                                                                                  |
+| `--train-rl --phase N --resume`      | Resume RL training from last checkpoint for specified phase                                                                                                          |
+| `--dry-run`                          | Enable dry-run mode. All bet logic runs, but no real bets are placed. Simulated actions logged to `audit_log`.                                                       |
 
 ---
 
-## 3. Leo.py — Step-by-Step Execution Flow (v7.2)
+## 3. Leo.py — Step-by-Step Execution Flow
 
 Leo.py orchestrates the cycle with autonomous task management:
 
@@ -183,32 +201,43 @@ Leo.py orchestrates the cycle with autonomous task management:
 2. **Startup Sync**: Call `run_startup_sync()` — push-only sync to ensure Supabase parity. If local DB is empty/missing, auto-bootstraps from Supabase.
 3. **Streamer Ignition**: Spawn isolated streamer task AFTER sync completes.
 
-### Supervisor orchestrator (Autonomous Loop)
+### Supervisor Orchestrator (Autonomous Loop)
 1. **Supervisor Initialization**: Loads `system_state` from SQLite. Instantiates chapter workers.
 2. **Cycle Hub**: Checks `scheduler` for next wake time. If target reached, dispatches workers sequentially.
 3. **Worker Execution**: Each worker (P1, P2, Ch1, Ch2) executes in isolation. Failures are captured, state is saved, and retries are managed by the Supervisor.
-21. **Prologue (Data Readiness Gates)**:
+4. **Prologue (Data Readiness Gates)**:
     - **P1: Quantity & ID Gate**: Leagues ≥ 90% coverage AND teams ≥ 3 per processed league. Validates IDs. O(1) lookup via `readiness_cache`.
-    - **P2: History & Quality Gate**: Verify 2+ distinct seasons. Logic: pass if 0 critical gaps AND 0 completed season mismatches. **ACTIVE seasons ignored.** 
+    - **P2: History & Quality Gate**: Verify 2+ distinct seasons. Logic: pass if 0 critical gaps AND 0 completed season mismatches. **ACTIVE seasons ignored.**
     - **P3: AI Gate**: RL base model + league adapters exist. **Phase Auto-Detection** checks `match_odds` and `fixtures` counts to unlock Phase 2/3.
     - *All gates use a 30-minute auto-remediation timeout. If they fail, they return `NOT READY` and block the pipeline until auto-remediation or manual fix.*
-3. **Chapter 1: Prediction Pipeline**:
-    - **P1**: **URL Resolution & Direct Odds Harvesting** (v9.0 stable, 181 page loads vs 1532 fixtures).
-    - **P2**: Predictions (**30-dim Stairway Engine**). **Data Leak Guard**: Max 1 prediction per team per week. 
+5. **Chapter 1: Prediction Pipeline**:
+    - **P1**: **URL Resolution & Direct Odds Harvesting** (v9.0 stable, 181 page loads vs 1,532 fixtures). *Active pipeline: Runs 1–7 complete. Run 8 blocked — see [Active Blockers](#active-blockers).*
+    - **P2**: Predictions (**30-dim Stairway Engine**). **Data Leak Guard**: Max 1 prediction per team per week.
     - **P3**: Final Chapter Sync (push-only watermark delta) & **EV-Positive Recommendation** generation (Odds 1.20–4.00).
-4. **Chapter 2: Betting & Funds**:
-    - **P1**: Automated Booking on Football.com (see [Safety Guardrails](#6-bet-safety-guardrails)).
+6. **Chapter 2: Betting & Funds**:
+    - **P1**: Automated Booking on Football.com (see [Safety Guardrails](#7-bet-safety-guardrails)).
     - **P2**: Funds balance + withdrawal check.
-5. **Cycle Complete — Dynamic Sleep**:
+7. **Cycle Complete — Dynamic Sleep**:
     - Log completion.
     - Consult `scheduler.next_wake_time()`.
     - Sleep until next task or default interval.
+
+### Active Blockers
+
+| Blocker | Resolution |
+|---------|-----------|
+| Gemini 2.5 Pro daily quota exhausted during Run 7 | Await midnight UTC quota reset |
+| Browser crash after Run 7 | Browser restart required before Run 8 |
+| `llm_health_manager.py` Fix 6 pending | Broaden `_ping_key` to treat HTTP 400 as dead-key signal (alongside 401/403) |
 
 ---
 
 ## 4. Design & UI/UX
 
 The LeoBook Flutter app (`leobookapp/`) reads exclusively from Supabase. It is a pure read client — no data flows from the app back to the backend.
+
+> [!WARNING]
+> The Flutter app currently uses BLoC + Provider + Supabase. This conflicts with mandatory engineering rules (Riverpod 2+ and Firebase). Migration is tracked as a medium-priority tech debt item.
 
 ---
 
@@ -226,7 +255,7 @@ flowchart LR
         SCHED["Task Scheduler"]
         GATES["Data Gates P1-P3<br/>(30-min timeout)"]
         PREDICT["Predict<br/>(Rule Engine + RL)"]
-        BOOK["Place Bets"]
+        BOOK["Place Bets<br/>(Guardrails enforced)"]
         STREAM["Live Streamer<br/>(isolated)"]
     end
 
@@ -256,7 +285,51 @@ flowchart LR
 
 ---
 
-## 6. Bet Safety Guardrails
+## 6. Project Stairway — Capital Engine
+
+**Project Stairway** is the capital compounding engine at the heart of LeoBook. It is not a gambling system — it is a structured, self-protecting staking architecture.
+
+### Core Mechanics
+
+- **7-stair cycle** starting from a ₦1,000 seed
+- **Target: ~4.0 accumulator odds per stair** — always built as a **multi-match accumulator** (2–8 selections), **never a single-match 4.0 bet**
+- **Min odds per selection:** 1.20 | **Max selections per stair:** 8
+- **Loss rule:** Fall back exactly **one stair** — not to zero. The previous stake becomes the safety net.
+- **Cycle completion:** Accumulated Safety Net crosses ₦1,000,000 at Stair 7
+
+### Stairway Table
+
+| Stair | Stake | Payout @4x | Next Stair Stake | Safety Net |
+|-------|-------|------------|-----------------|------------|
+| 1 | ₦1,000 | ₦4,000 | ₦3,000 | ₦1,000 |
+| 2 | ₦3,000 | ₦12,000 | ₦9,000 | ₦3,000 |
+| 3 | ₦9,000 | ₦36,000 | ₦27,000 | ₦9,000 |
+| 4 | ₦27,000 | ₦108,000 | ₦81,000 | ₦27,000 |
+| 5 | ₦81,000 | ₦324,000 | ₦243,000 | ₦81,000 |
+| 6 | ₦243,000 | ₦972,000 | ₦729,000 | ₦243,000 |
+| 7 | ₦729,000 | ₦2,916,000 | ₦2,187,000 | ₦729,000 |
+
+**At Stair 7 win:** Working capital = ₦2,187,000 | Floor (safety net) = ₦729,000 | **Both are meaningful outcomes.**
+
+### Loss Rule (One-Back, Not Reset)
+
+The difference between "fall back one stair" and "reset to stair 1" is the entire system's resilience mechanism:
+
+- A loss at Stair 4 (₦27,000) → next stake is Stair 3 (₦9,000)
+- Not a full reset — the accumulated Safety Net from previous stairs is preserved
+- The system can resume climbing from the previous stair rather than starting from zero
+
+### System Enforcement
+
+The `StaircaseTracker` class in `Core/System/guardrails.py` persists state in the SQLite `stairway_state` table. It enforces:
+- `advance()`: move to next stair on win
+- `fall_back()`: move back exactly one stair on loss (not `reset()`)
+- `get_max_stake()`: return the current stair's exact stake value (caps bet placement)
+- Cycle count: tracks full 7-stair completions
+
+---
+
+## 7. Bet Safety Guardrails
 
 > [!IMPORTANT]
 > Chapter 2 (automated bet placement) involves real money. All safety guardrails are **implemented and enforced** in `Core/System/guardrails.py` (v1.0, March 10, 2026). Chapter 2 cannot execute without passing all checks.
@@ -270,8 +343,8 @@ flowchart LR
 | **Max 1/team/week**         | ✅ Implemented | `prediction_pipeline.py`           | Data leak guard prevents stale-data predictions.                                                             |
 | **Dry-Run Mode**            | ✅ Implemented | `guardrails.enable_dry_run()`      | `--dry-run` flag blocks all bet execution. Logs simulated actions to audit_log.                              |
 | **Kill Switch**             | ✅ Implemented | `guardrails.check_kill_switch()`   | `STOP_BETTING` file halts all betting immediately. Delete file to resume.                                    |
-| **Max Stake Cap**           | ✅ Implemented | `guardrails.StaircaseTracker`      | Stake capped to Stairway table step value (₦1,000 at step 1 → ₦2,048,000 at step 7). Replaces hardcoded 50%. |
-| **Staircase State Machine** | ✅ Implemented | `guardrails.StaircaseTracker`      | 7-step state machine persisted in SQLite. Win → advance, Loss → reset to step 1. Cycle count tracked.        |
+| **Max Stake Cap**           | ✅ Implemented | `guardrails.StaircaseTracker`      | Stake capped to exact Stairway table value for current step (₦1,000 at step 1 → ₦729,000 at step 7). Replaces hardcoded 50%. |
+| **Staircase State Machine** | ✅ Implemented | `guardrails.StaircaseTracker`      | 7-step state machine persisted in SQLite. Win → advance one stair, Loss → fall back **exactly one stair**. Cycle count tracked. |
 | **Balance Sanity Check**    | ✅ Implemented | `guardrails.check_balance_sanity()`| Blocks betting if balance < ₦500 (configurable via `MIN_BALANCE_BEFORE_BET`).                                |
 | **Daily Loss Limit**        | ✅ Implemented | `guardrails.check_daily_loss_limit()`| Sums today's losses from audit_log. Halts if ≥ ₦5,000 (configurable via `DAILY_LOSS_LIMIT`).               |
 
@@ -282,11 +355,11 @@ flowchart LR
 | `Leo.py` dispatch (Chapter 2) | `run_all_pre_bet_checks()` | Blocks entire chapter if any check fails |
 | `fb_manager.run_automated_booking()` | `check_kill_switch()` + `is_dry_run()` | Blocks booking before browser launch |
 | `placement.place_multi_bet_from_codes()` | `run_all_pre_bet_checks()` | Blocks individual bet execution |
-| `placement.calculate_kelly_stake()` | `StaircaseTracker.get_max_stake()` | Caps stake to current Stairway step |
+| `placement.calculate_kelly_stake()` | `StaircaseTracker.get_max_stake()` | Caps stake to current Stairway step value |
 
 ---
 
-## 7. Model Performance & Open Quests
+## 8. Model Performance & Open Quests
 
 > [!IMPORTANT]
 > LeoBook is in **active development — modular testing phase**. No end-to-end pipeline test has been completed. The numbers below are preliminary and will be updated after full pipeline validation.
@@ -296,25 +369,30 @@ flowchart LR
 | Metric                   | Value             | Notes                                                        |
 | ------------------------ | ----------------- | ------------------------------------------------------------ |
 | Action Space             | 30 Actions        | Expanded from 8 in v8.0 (1X2, DC, OU, BTTS)                  |
-| RL Training Accuracy     | Phase 1 Stable    | Poisson expert grounding provides robust base for imitation. |
+| RL Training              | Phase 1 — Day 34/99 | Poisson expert grounding provides robust base for imitation. |
 | Rule Engine Accuracy     | Untested at scale | Individual rule components work; aggregate accuracy unknown. |
 | Calibration              | 3-Phase PPO       | v8.0 introduces KL divergence for stable calibration.        |
-| Per-Step Win Probability | Unmeasured        | The foundational number for Project Stairway viability.      |
+| Per-Step Win Probability | **Unmeasured**    | The foundational number for Project Stairway viability.      |
+| Ch1 P1 Pipeline          | Runs 1–7 complete | Run 8 blocked (quota + browser restart)                      |
+| Backtest                 | 45-day run active | No report output yet                                         |
 
 ### Open Quests (To Be Answered by Pipeline Testing)
 
-1. What is LeoBook's actual per-step win probability on selected bets at ~4.0 odds?
-2. How does win probability vary by league, sport, and season stage?
-3. Is the optimal step target a single match at 4.0, or a 2-3 match accumulator multiplying to 4.0?
-4. What is the empirically observed calibration of the model?
-5. What is the expected number of cycles before a full 7-step staircase completes?
-6. What is the optimal confidence threshold gate for bet placement?
+These are intellectually honest unknowns. They will be answered by data, not assumption.
 
-These questions will be answered by data, not assumption.
+1. What is LeoBook's actual per-stair win probability on ~4.0 accumulator bets?
+2. How does win probability vary by accumulator construction (2 vs 5 vs 8 selections)?
+3. Is the model calibrated — does 38% predicted confidence = ~38% actual win rate?
+4. What is the expected number of cycles before a full 7-stair run completes?
+5. What is the capital efficiency gain of "fall back one stair" vs a full reset to stair 1?
+6. What is the optimal confidence threshold gate for stair placement?
+7. Does a broader match pool (multi-sport) increase per-stair win probability?
+8. At what win rate per stair does the system become net-positive over 100 cycles?
+9. What is the average number of stairs climbed per cycle before a loss?
 
 ---
 
-## 8. Testing Strategy
+## 9. Testing Strategy
 
 ### Current State
 
@@ -343,7 +421,7 @@ These questions will be answered by data, not assumption.
 
 ---
 
-## 9. Observability & Logging
+## 10. Observability & Logging
 
 ### Terminal Logging
 
@@ -363,6 +441,7 @@ These questions will be answered by data, not assumption.
 - **Time-Based Cooldowns**: 429 rate-limited keys auto-recover after 65 seconds (replaced permanent exhaustion). Added March 10, 2026.
 - **Exponential Backoff**: Consecutive 429s trigger `min(2^n, 30)` second delays in `build_search_dict.py` and `api_manager.py`.
 - **Circuit Breaker**: `build_search_dict.py` checks `health_manager._gemini_active` before each batch — if all providers are dead, skips remaining work instantly.
+- **Fix 6 (Pending)**: Broaden `_ping_key` to treat HTTP 400 as a dead-key signal alongside 401/403.
 
 ### Monitoring
 
@@ -371,7 +450,16 @@ These questions will be answered by data, not assumption.
 
 ---
 
----
+## 11. Changelog
+
+### v8.1.0 — Pipeline & Documentation Update (March 12, 2026)
+- **Ch1 P1 Status**: Runs 1–7 complete. Run 8 blocked (Gemini quota + browser restart).
+- **RL Training**: Phase 1 Day 34 of 99 (background process active).
+- **Backtest**: 45-day run in background.
+- **Fix 6 Queued**: `llm_health_manager._ping_key` to treat HTTP 400 as dead-key signal.
+- **Stairway Loss Rule Clarified**: Loss = fall back exactly ONE stair (not full reset to stair 1).
+- **Oracle Cloud**: Infrastructure setup in progress (pending user action).
+- **Local machine**: `C:\Users\Admin\Desktop\ProProjection\LeoBook` flagged as contaminated — git triage pending.
 
 ### RL Overhaul v8.0 "Stairway Engine" (March 9, 2026)
 - **30-Dimension Action Space**: Full coverage for 1X2, Double Chance, Over/Under (1.5, 2.5, 3.5), and BTTS.
@@ -383,12 +471,12 @@ These questions will be answered by data, not assumption.
 
 ### Safety Guardrails v1.0 (March 10, 2026)
 - **6 Guardrails in `Core/System/guardrails.py`**: Dry-run, kill switch, staircase state machine, max stake cap, balance sanity, daily loss limit.
-- **Staircase State Machine**: 7-step compounding tracker persisted in SQLite `stairway_state` table. Win → advance, loss → reset.
+- **Staircase State Machine**: 7-step compounding tracker persisted in SQLite `stairway_state` table. Win → advance one stair; Loss → fall back one stair.
 - **Triple Enforcement**: Guardrails checked at Leo.py dispatch, fb_manager booking entry, and placement execution.
 
 ### Gemini 429 Rate-Limit Fix (March 10, 2026)
 - **Time-Based Cooldowns**: Replaced permanent key exhaustion with 65-second auto-recovery in `llm_health_manager.py`.
 - **Exponential Backoff**: `min(2^n, 30)` second delays on consecutive 429s in `build_search_dict.py` and `api_manager.py`.
 
-*Last updated: March 10, 2026 (v8.1.0 — Safety Guardrails + 429 Fix)*
+*Last updated: March 12, 2026 (v8.1.0 — Pipeline Update + Stairway Clarification)*  
 *LeoBook Engineering Team — Materialless LLC*
