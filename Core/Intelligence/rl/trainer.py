@@ -39,11 +39,14 @@ Bug fixes applied (2026-03-14):
   FIX-6: GradNorm clamped at 0.5 constantly — max_norm raised to 1.0 for Phase 2/3
           (imitation still uses 0.5 for stability). Scheduler T_0 raised to 2000 to
           reduce oscillation from premature warm restarts.
-  FIX-7: --train-rl without --train-season defaulted to "current" but the
-          current-season join returned all completed fixtures back to 2012 when
-          leagues.current_season is not fully populated, effectively running
-          "--train-season all". Now the fallback is capped at 365 days of data
-          to prevent runaway training on a plain --train-rl invocation.
+  FIX-7: --train-rl runaway caused by silent last-resort fallback. The primary and
+          first-fallback paths are fully season-aware and uncapped — the per-league
+          leagues.current_season join is the correct boundary. Each league's season
+          starts at its own date (August for European leagues, January for calendar-year
+          leagues) and a global date cap would be wrong for all of them. The last-resort
+          path (no season metadata found at all) now aborts with a clear error message
+          directing the operator to run --enrich-leagues, instead of silently
+          training on all history back to 2012.
 """
 
 import os
@@ -76,9 +79,7 @@ MODELS_DIR = PROJECT_ROOT / "Data" / "Store" / "models"
 BASE_MODEL_PATH = MODELS_DIR / "leobook_base.pth"
 TRAINING_CONFIG_PATH = MODELS_DIR / "training_config.json"
 
-# FIX-7: Cap for plain --train-rl (current season, no --cold, no --train-season all).
-# Prevents the 2012→present runaway when leagues.current_season is not fully populated.
-DEFAULT_CURRENT_SEASON_MAX_DAYS = 365
+
 
 
 class RLTrainer:
@@ -166,18 +167,28 @@ class RLTrainer:
         Build the ordered list of fixture-dates for training, filtered to the
         requested season scope.
 
+        The model is fully season-aware: the primary path joins schedules against
+        leagues.current_season per league, so each league's training window starts
+        from its own actual season kickoff date — not a global cutoff.
+        Split-season leagues (e.g. "2025/2026") and calendar-year leagues
+        (e.g. "2025" or "2026") are both handled correctly via the season label
+        stored in leagues.current_season.
+
+        No date caps are applied to the primary path or the first fallback.
+        A 365-day cap is applied ONLY to the emergency last-resort path, which
+        should never be reached in normal operation. If it is reached, training
+        aborts with a clear message directing the operator to run --enrich-leagues.
+
         Args:
             target_season:
                 "current"   — per-league join against leagues.current_season.
-                              Starts training from the actual start of each
-                              league's live season. Capped at DEFAULT_CURRENT_SEASON_MAX_DAYS
-                              to prevent runaway training when current_season metadata
-                              is not fully populated (FIX-7).
+                              Training starts from each league's own season start.
+                              This is the correct default.
                 "all"       — all available completed fixtures, oldest-first.
-                              Use for a full cold retraining across all seasons.
+                              Use with --cold for full historical retraining.
                 int N       — past season by offset: 1 = most recent past,
-                              2 = two seasons ago, etc. (0-indexed internally,
-                              1-indexed in the CLI to match enrich_leagues).
+                              2 = two seasons ago, etc. (1-indexed, matches
+                              --season N in enrich_leagues).
                 str label   — explicit season label, e.g. "2024/2025" or "2025".
 
         Returns:
@@ -232,11 +243,9 @@ class RLTrainer:
                   f"fixtures. Falling back to current.")
 
         # ── Current season (default) ─────────────────────────────────────────────
-        # FIX-7: Apply a date cap to prevent the current-season join from spanning
-        # back to 2012 when leagues.current_season is not fully populated.
-        # A plain --train-rl should train on the last ~1 year of data, not all history.
-        cap_date = (datetime.now() - timedelta(days=DEFAULT_CURRENT_SEASON_MAX_DAYS)).strftime("%Y-%m-%d")
-
+        # Join schedules against leagues.current_season so training starts from
+        # each league's actual season start date. No date cap applied here —
+        # the season label itself is the correct boundary.
         rows = conn.execute("""
             SELECT DISTINCT s.date
             FROM schedules s
@@ -244,47 +253,58 @@ class RLTrainer:
             WHERE s.season = l.current_season
               AND s.home_score IS NOT NULL AND s.away_score IS NOT NULL
               AND s.date IS NOT NULL AND s.date <= ?
-              AND s.date >= ?
             ORDER BY s.date ASC
-        """, (today_str, cap_date)).fetchall()
+        """, (today_str,)).fetchall()
         dates = [r[0] for r in rows]
 
         if dates:
-            return dates, f"current season (per-league season join, capped to last {DEFAULT_CURRENT_SEASON_MAX_DAYS}d)"
+            return dates, "current season (per-league season join)"
 
-        # Fallback: leagues.current_season not populated — use most recent season label,
-        # still capped to DEFAULT_CURRENT_SEASON_MAX_DAYS.
+        # ── First fallback: leagues.current_season not fully populated ────────────
+        # Use the most recent season label discovered in schedules.
+        # No date cap — the season label is the correct boundary.
         seasons = self._discover_seasons(conn)
         if seasons:
             season_label = seasons[0]
-            print(f"  [TRAIN] Current-season join returned no dates "
-                  f"(leagues.current_season may not be fully populated). "
-                  f"Falling back to most recent season in DB: {season_label}")
+            print(
+                f"\n  [TRAIN] ⚠ WARNING: Current-season join returned no dates.\n"
+                f"  [TRAIN]   leagues.current_season is not populated for enough leagues.\n"
+                f"  [TRAIN]   Falling back to most recent season in DB: {season_label}\n"
+                f"  [TRAIN]   → Run: python Leo.py --enrich-leagues\n"
+                f"  [TRAIN]     to populate current_season and fix this properly.\n"
+            )
             rows = conn.execute("""
                 SELECT DISTINCT date FROM schedules
                 WHERE season = ?
                   AND home_score IS NOT NULL AND away_score IS NOT NULL
                   AND date IS NOT NULL AND date <= ?
-                  AND date >= ?
                 ORDER BY date ASC
-            """, (season_label, today_str, cap_date)).fetchall()
+            """, (season_label, today_str)).fetchall()
             dates = [r[0] for r in rows]
-            return dates, (
-                f"season {season_label} (fallback — run --enrich-leagues to populate current_season, "
-                f"capped to last {DEFAULT_CURRENT_SEASON_MAX_DAYS}d)"
-            )
+            if dates:
+                return dates, (
+                    f"season {season_label} "
+                    f"(fallback — run --enrich-leagues to populate current_season)"
+                )
 
-        # Last resort: capped global window
-        print("  [TRAIN] WARNING: No season metadata found. Falling back to capped global date window.")
-        rows = conn.execute("""
-            SELECT DISTINCT date FROM schedules
-            WHERE date IS NOT NULL
-              AND home_score IS NOT NULL AND away_score IS NOT NULL
-              AND date <= ?
-              AND date >= ?
-            ORDER BY date ASC
-        """, (today_str, cap_date)).fetchall()
-        return [r[0] for r in rows], f"global capped window (last {DEFAULT_CURRENT_SEASON_MAX_DAYS}d)"
+        # ── Last resort: no season metadata at all — ABORT ────────────────────────
+        # This path should never be reached in normal operation. If it is, the DB
+        # has not been enriched. Returning an uncapped global window here would
+        # silently train on all available history which is NOT what --train-rl means.
+        # We return empty to let train_from_fixtures print the "no dates found" message
+        # and exit cleanly, directing the operator to run --enrich-leagues first.
+        print(
+            f"\n  [TRAIN] ✗ CRITICAL: No season metadata found in the database.\n"
+            f"  [TRAIN]   Cannot determine current season boundaries for any league.\n"
+            f"  [TRAIN]   Training aborted — this would span all available history.\n"
+            f"\n"
+            f"  [TRAIN]   Fix: python Leo.py --enrich-leagues\n"
+            f"  [TRAIN]   Then retry: python Leo.py --train-rl\n"
+            f"\n"
+            f"  [TRAIN]   If you intentionally want to train on all history:\n"
+            f"  [TRAIN]   Use: python Leo.py --train-rl --train-season all --cold\n"
+        )
+        return [], "aborted — no season metadata (run --enrich-leagues first)"
 
     # -------------------------------------------------------------------
     # Reward functions (30-dim action space)
@@ -673,9 +693,10 @@ class RLTrainer:
             target_season:
                 "current"   Per-league season start (default). Joins against
                             leagues.current_season so each league's season
-                            start date is respected individually. Capped at
-                            DEFAULT_CURRENT_SEASON_MAX_DAYS days to prevent
-                            runaway training (FIX-7).
+                            start date is respected individually. No date cap
+                            applied — the season label is the correct boundary
+                            (August for European leagues, January for calendar-
+                            year leagues, etc.).
                 "all"       All available seasons, oldest-first. Full cold retrain.
                 int N       Past season by offset: 1 = most recent past season,
                             2 = two seasons ago, etc. Matches enrich_leagues convention.

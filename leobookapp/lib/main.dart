@@ -4,7 +4,7 @@
 // Classes: LeoBookApp
 
 import 'package:flutter/material.dart';
-import 'package:leobookapp/core/theme/app_theme.dart';
+import 'package:leobookapp/core/theme/app_theme_v2.dart';
 import 'package:leobookapp/logic/cubit/home_cubit.dart';
 import 'package:leobookapp/data/repositories/data_repository.dart';
 import 'package:leobookapp/data/repositories/news_repository.dart';
@@ -52,7 +52,9 @@ class LeoBookApp extends StatelessWidget {
         ],
         child: MaterialApp(
           title: 'LeoBook',
-          theme: AppTheme.darkTheme,
+          theme: AppThemeV2.lightTheme,
+          darkTheme: AppThemeV2.darkTheme,
+          themeMode: ThemeMode.dark,
           home: const MainScreen(),
           debugShowCheckedModeBanner: false,
           builder: (context, child) {
