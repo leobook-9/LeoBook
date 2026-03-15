@@ -1493,6 +1493,20 @@ async def main(
     except Exception as e:
         print(f"  [Crests] Final propagation failed: {e}")
 
+    # ── Final Supabase sync — push clean data before gap scan runs ───────────
+    # Ensures Supabase reflects the fully propagated state (crests, country codes,
+    # gap resolver fixes) before we report what remains.
+    if sync_mgr and sync_mgr.supabase:
+        try:
+            print("  [Sync] Final push to Supabase...")
+            for tkey in ("schedules", "teams", "leagues"):
+                cfg = TABLE_CONFIG.get(tkey)
+                if cfg:
+                    await sync_mgr._sync_table(tkey, cfg)
+            print("  [Sync] Final sync complete")
+        except Exception as e:
+            print(f"  [Sync] Final sync failed: {e}")
+
     # ── Final gap scan — show what remains ───────────────────────────────
     print(f"\n  [GapScan] Post-enrichment verification...")
     final_report = GapScanner(conn).scan()

@@ -270,13 +270,18 @@ async def run_predictions(conn=None, fixtures: List[Dict] = None, scheduler=None
                 away_team_id=fixture.get("away_team_id", "")
             )
 
-            # Ensemble Merge
+            # Ensemble Merge — scale W_neural by data richness for this league
+            richness = EnsembleEngine.get_richness_score(
+                fixture.get("league_id", "GLOBAL"),
+                current_season=fixture.get("season", ""),
+            )
             merged = EnsembleEngine.merge(
                 rule_logits=rule_prediction.get("raw_scores", {"home": 1.0, "draw": 1.0, "away": 1.0}),
                 rule_conf=rule_prediction.get("market_reliability", 50) / 100.0,
                 rl_logits=rl_prediction.get("rl_action_probs"),
                 rl_conf=rl_prediction.get("ml_confidence"),
-                league_id=fixture.get("league_id", "GLOBAL")
+                league_id=fixture.get("league_id", "GLOBAL"),
+                data_richness_score=richness,
             )
 
             # Integrate merged data into final prediction

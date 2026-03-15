@@ -62,25 +62,44 @@ class SeasonCompletenessTracker:
         if not stats or stats["total_scanned"] == 0:
             return None
 
-        # 2. Determine/Fetch expected matches
-        total_expected = cls._get_expected_matches(league_id, season, stats["total_scanned"], conn=local_conn)
-        
+        # 2. Count registered teams (needed for CUP_FORMAT detection + expected calculation)
+        team_count_row = local_conn.execute(
+            "SELECT COUNT(*) as cnt FROM teams WHERE league_ids LIKE ?",
+            (f'"%{league_id}%"',)
+        ).fetchone()
+        team_count = (
+            (team_count_row["cnt"] if hasattr(team_count_row, "keys") else team_count_row[0])
+            if team_count_row else 0
+        )
+
+        # 3. Determine expected matches
+        total_expected = cls._get_expected_matches(
+            league_id, season, stats["total_scanned"], team_count=team_count, conn=local_conn
+        )
+
         total_scanned = stats["total_scanned"]
         finished = stats["finished"] or 0
         scheduled = stats["scheduled"] or 0
         live = stats["live"] or 0
         postponed = stats["postponed"] or 0
         canceled = stats["canceled"] or 0
-        
+
         completeness_pct = round((total_scanned / total_expected) * 100, 2) if total_expected > 0 else 0
         progress_pct = round(((finished + postponed + canceled) / total_expected) * 100, 2) if total_expected > 0 else 0
-        
-        # 3. Determine status
-        status = "ACTIVE"
-        if completeness_pct >= 99.0 and scheduled == 0 and live == 0:
-            status = "COMPLETED"
-        elif completeness_pct < 80.0 and status != "COMPLETED":
-            status = "INCOMPLETE"
+
+        # 4. Determine status
+        # Leagues with <4 registered teams are cup-format competitions (super cups,
+        # one-off finals, playoff legs). They have no meaningful completeness concept
+        # and must never be marked COMPLETED via the fallback heuristic.
+        is_cup_format = total_expected <= total_scanned and team_count < 4
+
+        status = "CUP_FORMAT" if is_cup_format else "ACTIVE"
+
+        if not is_cup_format:
+            if completeness_pct >= 99.0 and scheduled == 0 and live == 0:
+                status = "COMPLETED"
+            elif completeness_pct < 80.0:
+                status = "INCOMPLETE"
 
         # 4. Upsert into season_completeness
         local_conn.execute("""
@@ -112,33 +131,48 @@ class SeasonCompletenessTracker:
         return status
 
     @classmethod
-    def _get_expected_matches(cls, league_id: str, season: str, scanned_count: int, conn=None) -> int:
+    def _get_expected_matches(
+        cls,
+        league_id: str,
+        season: str,
+        scanned_count: int,
+        team_count: int = 0,    # pre-computed by compute_for_league — avoids extra query
+        conn=None,
+    ) -> int:
         """
-        Heuristic for calculating total matches expected in a round-robin season.
-        Formula: teams * (teams - 1)
+        Heuristic for expected total matches in a season.
+
+        Formula: teams * (teams - 1) for round-robin leagues.
+        Falls back to scanned_count ONLY when team_count >= 4 and scanned
+        exceeds the round-robin estimate (split seasons, playoffs, etc.).
+        Returns scanned_count for cup-format (<4 teams) but CUP_FORMAT
+        status is determined by the caller — this function just returns a
+        number; status logic lives in compute_for_league.
         """
         local_conn = conn or get_connection()
-        # 1. Existing manual override or previous calculation
-        row = local_conn.execute("SELECT total_expected_matches FROM season_completeness WHERE league_id=? AND season=?", (league_id, season)).fetchone()
-        if row and row["total_expected_matches"]:
-            return row["total_expected_matches"]
-            
-        # 2. Calculate from teams in league
-        # We need a way to count teams associated with this league.
-        # Currently team.league_ids is a JSON array in SQLite.
-        team_count_row = local_conn.execute("SELECT COUNT(*) as cnt FROM teams WHERE league_ids LIKE ?", (f'%"{league_id}"%',)).fetchone()
-        team_count = team_count_row["cnt"] if team_count_row else 0
-        
+
+        # 1. Manual override always wins
+        row = local_conn.execute(
+            "SELECT total_expected_matches FROM season_completeness "
+            "WHERE league_id=? AND season=?",
+            (league_id, season)
+        ).fetchone()
+        if row:
+            val = row["total_expected_matches"] if hasattr(row, "keys") else row[0]
+            if val:
+                return val
+
+        # 2. Round-robin formula (reliable for domestic leagues with >=4 teams)
         if team_count >= 4:
-            # Standard Round-Robin (Home + Away)
             expected = team_count * (team_count - 1)
-            # Sanity check: if scanned is much higher, use scanned (could be playoffs/split)
-            if scanned_count > expected:
-                return scanned_count
-            return expected
-            
-        # Fallback to scanned_count if heuristic is unreliable
-        return scanned_count or 1 
+            # If scanned exceeds round-robin estimate, the season has extra rounds
+            # (playoffs, split format) — use scanned as the floor
+            return max(expected, scanned_count)
+
+        # 3. Cup-format (<4 teams) — return scanned so completeness_pct = 100%
+        # but the CUP_FORMAT status in compute_for_league prevents COMPLETED
+        # being assigned. This value is stored for audit but not used for gates.
+        return scanned_count or 1
 
     @classmethod
     def bulk_compute_all(cls):
@@ -167,3 +201,52 @@ class SeasonCompletenessTracker:
         if row:
             return dict(row)
         return {"season_status": "UNKNOWN", "progress_pct": 0}
+
+    @classmethod
+    def get_data_richness_score(cls, league_id: str, current_season: str, conn=None) -> float:
+        """Compute a data richness score in [0.0, 1.0] for a league.
+
+        Measures how many PRIOR seasons (not the current one) exist with
+        meaningful finished matches. Used by the ensemble to scale RL weight.
+
+        Score mapping:
+            0 prior seasons  -> 0.0   (pure Rule Engine — no training history)
+            1 prior season   -> 0.33  (RL gets ~33% of its configured weight)
+            2 prior seasons  -> 0.67  (RL gets ~67% of its configured weight)
+            3+ prior seasons -> 1.0   (RL gets full configured weight)
+
+        A "prior season" counts only if:
+            - season != current_season
+            - season_status IN ('COMPLETED', 'ACTIVE')
+            - season_status != 'CUP_FORMAT'
+            - finished_matches >= 20
+
+        Args:
+            league_id:      The league to evaluate.
+            current_season: The active season string (from leagues.current_season).
+            conn:           Optional open SQLite connection.
+
+        Returns:
+            Float in [0.0, 1.0]. Returns 0.0 if no data or on error.
+        """
+        try:
+            local_conn = conn or get_connection()
+            row = local_conn.execute("""
+                SELECT COUNT(*) as prior_seasons
+                FROM season_completeness
+                WHERE league_id = ?
+                  AND season != ?
+                  AND season_status IN ('COMPLETED', 'ACTIVE')
+                  AND season_status != 'CUP_FORMAT'
+                  AND finished_matches >= 20
+            """, (league_id, current_season or "")).fetchone()
+
+            prior = (row["prior_seasons"] if hasattr(row, "keys") else row[0]) if row else 0
+
+            # Cap at 3 for score calculation, then normalize to [0, 1]
+            capped = min(prior, 3)
+            return round(capped / 3.0, 4)
+
+        except Exception as e:
+            logger.warning("[Completeness] data_richness_score failed for %s: %s", league_id, e)
+            return 0.0

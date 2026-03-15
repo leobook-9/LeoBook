@@ -190,9 +190,53 @@ def check_seasons_ready(conn=None, min_seasons: int = 2) -> Tuple[bool, Dict]:
     completed_mismatch = completeness_stats[2] or 0
     active_count = completeness_stats[3] or 0
     active_avg_comp = completeness_stats[4] or 0
-    
-    # PASS if: 0 critical gaps AND 0 completed mismatches (Active seasons are ongoing)
+
+    # ── Job A: Internal consistency (gate — blocks if broken) ────────────────
+    # Same as before: no critical fs_league_id gaps, no completed mismatches.
+    # CUP_FORMAT seasons are excluded — they cannot mismatch by design.
     is_ready = critical_count == 0 and completed_mismatch == 0
+
+    # ── Job B: Historical depth (informational — never blocks) ───────────────
+    # Count leagues that have at least 1 prior season beyond the current one.
+    # This is a richness metric for the ensemble, not a pipeline gate.
+    depth_row = conn.execute("""
+        SELECT
+            COUNT(DISTINCT league_id) as leagues_with_history,
+            AVG(prior_season_count) as avg_prior_seasons
+        FROM (
+            SELECT league_id, COUNT(*) as prior_season_count
+            FROM season_completeness
+            WHERE season_status IN ('COMPLETED', 'ACTIVE')
+              AND season_status != 'CUP_FORMAT'
+              AND finished_matches >= 20
+              AND season != COALESCE(
+                  (SELECT current_season FROM leagues l
+                   WHERE l.league_id = season_completeness.league_id LIMIT 1),
+                  ''
+              )
+            GROUP BY league_id
+        )
+    """).fetchone()
+
+    leagues_with_history = (
+        depth_row["leagues_with_history"]
+        if hasattr(depth_row, "keys") else depth_row[0]
+    ) if depth_row else 0
+    avg_prior_seasons = (
+        round(depth_row["avg_prior_seasons"] or 0, 1)
+        if hasattr(depth_row, "keys") else round(depth_row[1] or 0, 1)
+    ) if depth_row else 0.0
+
+    # Determine RL readiness tier (informational only)
+    total_active_leagues = active_count or 0
+    history_pct = (leagues_with_history / max(total_active_leagues, 1)) * 100
+
+    if history_pct >= 50:
+        rl_tier = "FULL"         # RL operates at full weight for majority of leagues
+    elif history_pct >= 20:
+        rl_tier = "PARTIAL"      # RL partially active — Rule Engine dominates
+    else:
+        rl_tier = "RULE_ENGINE"  # Pure Rule Engine — no meaningful RL history yet
 
     stats = {
         "critical_gaps": critical_count,
@@ -204,24 +248,34 @@ def check_seasons_ready(conn=None, min_seasons: int = 2) -> Tuple[bool, Dict]:
         "completed_mismatch": completed_mismatch,
         "active_seasons": active_count,
         "active_avg_comp": round(active_avg_comp, 1),
-        "ready": is_ready
+        "leagues_with_history": leagues_with_history,
+        "avg_prior_seasons": avg_prior_seasons,
+        "history_pct": round(history_pct, 1),
+        "rl_tier": rl_tier,
+        "ready": is_ready,
     }
 
-    # Print Pretty Output
     print("  ============================================================")
     print("    PROLOGUE P2: Data Quality & Season Completeness")
     print("  ============================================================")
     print(f"    [Leagues] FIXED {resolver_stats['fixed']} nulls, DERIVED {resolver_stats['derived']} flags")
     print(f"    [Queue]   {staged_count} items staged for re-enrichment ({critical_count} CRITICAL)")
     print(f"    [Seasons] {total_seasons} league-seasons computed")
-    print(f"      - COMPLETED: {completed_count} ({completed_mismatch} mismatches)")
-    print(f"      - ACTIVE:    {active_count} (avg {round(active_avg_comp, 1)}% coverage)")
-    
+    print(f"      - COMPLETED:   {completed_count} ({completed_mismatch} mismatches)")
+    print(f"      - ACTIVE:      {active_count} (avg {round(active_avg_comp, 1)}% coverage)")
+    print(f"      - CUP_FORMAT:  (excluded from gate)")
+    print(f"    [History] {leagues_with_history} leagues have prior season data")
+    print(f"      - Avg prior seasons: {avg_prior_seasons}")
+    print(f"      - RL tier: {rl_tier}  "
+          f"({'Full RL weight' if rl_tier == 'FULL' else 'Rule Engine dominant' if rl_tier == 'RULE_ENGINE' else 'Partial RL weight'})")
+
     if is_ready:
-        print(f"    [P2 ✓] READY — {critical_count} critical gaps | {completed_count} seasons COMPLETED | "
-              f"{active_count} seasons ACTIVE (ongoing, not blocking)")
+        print(f"    [P2 \u2713] READY \u2014 {critical_count} critical gaps | "
+              f"{completed_count} seasons COMPLETED | {active_count} ACTIVE | "
+              f"RL tier: {rl_tier}")
     else:
-        print(f"    [P2 ✗] NOT READY — {critical_count} critical gaps | {completed_mismatch} completed mismatches")
+        print(f"    [P2 \u2717] NOT READY \u2014 {critical_count} critical gaps | "
+              f"{completed_mismatch} completed mismatches")
     print("  ============================================================")
 
     update_cache('PROLOGUE_P2', is_ready, stats)

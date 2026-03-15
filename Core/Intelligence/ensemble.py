@@ -12,6 +12,7 @@ Supports per-league weighting and fallback logic for low-confidence neural outpu
 import json
 import os
 import logging
+import time
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -21,9 +22,15 @@ class EnsembleEngine:
     Neuro-Symbolic Ensemble Engine
     Merges Rule Engine (Symbolic) and RL (Neural) predictions with weighted averaging.
     """
-    
+
     _weights_path = os.path.join(os.path.dirname(__file__), '..', '..', 'Config', 'ensemble_weights.json')
     _weights = None
+
+    # Module-level richness cache: league_id -> data_richness_score
+    # Loaded once at first call, refreshed every 6 hours.
+    _richness_cache: Dict[str, float] = {}
+    _richness_loaded_at: float = 0.0
+    _RICHNESS_TTL: float = 6 * 3600  # 6 hours
 
     @classmethod
     def _load_weights(cls):
@@ -42,34 +49,45 @@ class EnsembleEngine:
         return cls._weights
 
     @classmethod
-    def merge(cls, rule_logits: Dict[str, float], rule_conf: float, 
-              rl_logits: Optional[Dict[str, float]], rl_conf: Optional[float], 
-              league_id: str) -> Dict[str, Any]:
+    def merge(cls, rule_logits: Dict[str, float], rule_conf: float,
+              rl_logits: Optional[Dict[str, float]], rl_conf: Optional[float],
+              league_id: str,
+              data_richness_score: float = 1.0) -> Dict[str, Any]:
         """
         Merge symbolic and neural outputs.
-        
+
         Args:
-            rule_logits: Dict with {'home': score, 'draw': score, 'away': score}
-            rule_conf: Confidence (0.0 - 1.0) from Rule Engine
-            rl_logits: Dict with {'home_win': prob, 'draw': prob, 'away_win': prob} or None
-            rl_conf: Confidence (0.0 - 1.0) from RL Engine or None
-            league_id: League ID for per-league weighting
-            
-        Returns:
-            Dictionary containing merged results and path taken.
+            rule_logits:         Dict with {'home': score, 'draw': score, 'away': score}
+            rule_conf:           Confidence (0.0 - 1.0) from Rule Engine
+            rl_logits:           Dict with {'home_win': prob, 'draw': prob, 'away_win': prob} or None
+            rl_conf:             Confidence (0.0 - 1.0) from RL Engine or None
+            league_id:           League ID for per-league weighting
+            data_richness_score: [0.0, 1.0] — scales W_neural.
+                                 0.0 = no prior season data (pure Rule Engine).
+                                 1.0 = 3+ prior seasons (full RL weight).
         """
         weights_data = cls._load_weights()
         league_weights = weights_data.get("leagues", {}).get(league_id, weights_data["default"])
-        
-        w_s = league_weights.get("W_symbolic", 0.7)
-        w_n = league_weights.get("W_neural", 0.3)
+
+        w_s_base = league_weights.get("W_symbolic", 0.7)
+        w_n_base = league_weights.get("W_neural", 0.3)
+
+        # Scale W_neural by data_richness_score [0.0, 1.0].
+        # With 0 prior seasons: W_neural = 0.0 (pure Rule Engine, no RL history).
+        # With 3+ prior seasons: W_neural = full configured weight.
+        # Remaining weight redistributed to W_symbolic to always sum to 1.0.
+        w_n = round(w_n_base * max(0.0, min(1.0, data_richness_score)), 4)
+        w_s = round(1.0 - w_n, 4)
 
         # Fallback to symbolic if RL confidence is too low or RL failed
         if rl_logits is None or rl_conf is None or rl_conf < 0.3:
             path = "symbolic_fallback"
             reason = "RL failed" if rl_logits is None else f"low confidence ({rl_conf:.2f} < 0.3)"
-            
-            logger.debug(f"[Ensemble] {league_id} | Path: {path} | Reason: {reason}")
+
+            logger.debug(
+                "[Ensemble] %s | Path: %s | Reason: %s | richness: %.2f",
+                league_id, path, reason, data_richness_score
+            )
             
             # Normalize rule_logits for consistency
             total = sum(rule_logits.values()) or 1.0
@@ -109,7 +127,10 @@ class EnsembleEngine:
 
         final_conf = (rule_conf * w_s) + (rl_conf * w_n)
         
-        logger.info(f"[Ensemble] {league_id} | Path: {path} | RL Conf: {rl_conf:.2f} | s:{w_s} n:{w_n}")
+        logger.info(
+            "[Ensemble] %s | Path: %s | RL Conf: %.2f | richness: %.2f | s:%.2f n:%.2f",
+            league_id, path, rl_conf, data_richness_score, w_s, w_n
+        )
         
         return {
             "logits": final_1x2,
@@ -117,6 +138,59 @@ class EnsembleEngine:
             "path": path,
             "weights": {"W_symbolic": w_s, "W_neural": w_n}
         }
+
+    @classmethod
+    def get_richness_score(cls, league_id: str, current_season: str = "") -> float:
+        """Return data_richness_score for a league from the cached table.
+
+        Loads all scores on first call (one DB query for all leagues),
+        then serves from memory. Refreshes every 6 hours.
+
+        Returns 1.0 as default if the league is not found — this means
+        leagues with no completeness data are treated as data-rich (safe
+        assumption for established leagues whose data pre-dates the tracker).
+        Returns 0.0 explicitly only when the league IS tracked and has no
+        prior seasons.
+        """
+        now = time.monotonic()
+
+        if not cls._richness_cache or (now - cls._richness_loaded_at) > cls._RICHNESS_TTL:
+            cls._load_richness_cache()
+            cls._richness_loaded_at = now
+
+        return cls._richness_cache.get(league_id, 1.0)
+
+    @classmethod
+    def _load_richness_cache(cls) -> None:
+        """Bulk-load data_richness_scores for all tracked leagues in one query."""
+        try:
+            from Data.Access.league_db import get_connection
+            from Data.Access.season_completeness import SeasonCompletenessTracker
+            conn = get_connection()
+
+            # Get all leagues tracked in season_completeness
+            rows = conn.execute("""
+                SELECT sc.league_id, l.current_season
+                FROM (SELECT DISTINCT league_id FROM season_completeness) sc
+                LEFT JOIN leagues l ON l.league_id = sc.league_id
+            """).fetchall()
+
+            new_cache: Dict[str, float] = {}
+            for row in rows:
+                lid = row[0] if not hasattr(row, "keys") else row["league_id"]
+                cur_season = (
+                    (row[1] if not hasattr(row, "keys") else row["current_season"]) or ""
+                )
+                new_cache[lid] = SeasonCompletenessTracker.get_data_richness_score(
+                    lid, cur_season, conn=conn
+                )
+
+            cls._richness_cache = new_cache
+            logger.debug("[Ensemble] Richness cache loaded: %d leagues", len(new_cache))
+
+        except Exception as e:
+            logger.warning("[Ensemble] Failed to load richness cache: %s", e)
+            # Keep existing cache rather than clearing it
 
 
 # ── 30-dim RL output → structured recommendation ─────────────
