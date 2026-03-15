@@ -15,10 +15,8 @@ from Core.Browser.site_helpers import get_main_frame
 from Data.Access.db_helpers import update_prediction_status
 from Core.Utils.utils import log_error_state, capture_debug_snapshot
 from Core.Intelligence.selector_manager import SelectorManager
-from Core.Intelligence.intelligence import fb_universal_popup_dismissal as neo_popup_dismissal
 from Core.Intelligence.aigo_suite import AIGOSuite
 from .ui import wait_for_condition
-from .mapping import find_market_and_outcome
 from .slip import get_bet_slip_count, force_clear_slip
 from Data.Access.db_helpers import log_audit_event
 

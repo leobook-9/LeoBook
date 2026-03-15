@@ -22,10 +22,8 @@ from Data.Access.db_helpers import (
 from Core.Utils.utils import log_error_state, capture_debug_snapshot
 # Corrected Imports for Core.Intelligence
 from Core.Intelligence.selector_manager import SelectorManager
-from Core.Intelligence.popup_handler import PopupHandler
 
 from .ui import handle_page_overlays, dismiss_overlays
-from .mapping import find_market_and_outcome
 from .slip import get_bet_slip_count
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 

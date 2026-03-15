@@ -17,7 +17,6 @@ from typing import Tuple, Optional, cast
 from playwright.async_api import Browser, BrowserContext, Page
 
 from Core.Browser.site_helpers import fb_universal_popup_dismissal
-from Core.Intelligence.intelligence import fb_universal_popup_dismissal as neo_popup_dismissal
 from Core.Intelligence.selector_manager import SelectorManager
 from Core.Utils.constants import NAVIGATION_TIMEOUT, WAIT_FOR_LOAD_STATE_TIMEOUT
 from Core.Utils.utils import capture_debug_snapshot, parse_date_robust

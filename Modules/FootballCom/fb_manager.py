@@ -27,7 +27,6 @@ from .odds_extractor import OddsExtractor, OddsResult
 from .fb_session import launch_browser_with_retry
 from .navigator import load_or_create_session, extract_balance, hide_overlays
 from .extractor import extract_league_matches, validate_match_data
-from .fb_url_resolver import resolve_fixture_to_fb_match, _get_fresh_page
 from Data.Access.db_helpers import (
     get_site_match_id, save_site_matches, save_match_odds,
     update_site_match_status,

@@ -17,7 +17,6 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from .selector_db import knowledge_db, save_knowledge
-from ..Browser.page_logger import log_page_html
 from ..Utils.utils import LOG_DIR
 
 

@@ -13,8 +13,6 @@ from playwright.async_api import Page
 # Import specialized AI modules
 from .selector_manager import SelectorManager
 from .visual_analyzer import VisualAnalyzer
-from .popup_handler import PopupHandler
-from .page_analyzer import PageAnalyzer
 from .utils import clean_json_response
 
 from .selector_db import knowledge_db
