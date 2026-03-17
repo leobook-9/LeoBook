@@ -2,10 +2,13 @@
 #                    a single match from football.com. No-login only.
 # Part of LeoBook Modules — FootballCom
 #
+# v5.0 (2026-03-17): Intro dialog dismissal + recursive scroll + recursive
+#   expand + knowledge.json selectors + ranked_markets extraction + debug
+#   screenshots on failure.
+#
 # Functions: OddsExtractor.extract(), _assert_no_login(),
 #            _parse_line(), _load_market_catalogue()
-# Called by: Modules/FootballCom/fb_url_resolver.py
-#            (resolve_urls_stable inner fixture loop)
+# Called by: fb_manager._odds_worker()
 
 import asyncio
 import json
@@ -19,6 +22,7 @@ from typing import List, Dict, Optional
 from playwright.async_api import Page
 
 from Core.Utils.constants import now_ng
+from Core.Intelligence.selector_manager import SelectorManager
 from Data.Access.league_db import upsert_match_odds_batch
 
 
@@ -51,6 +55,178 @@ class OddsResult:
     error: Optional[str] = None
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def _sel(key: str) -> str:
+    """Shorthand to get a fb_match_page selector from knowledge.json."""
+    return SelectorManager.get_selector("fb_match_page", key)
+
+
+async def _safe_screenshot(page: Page, fixture_id: str, tag: str = "") -> None:
+    """Take a debug screenshot (swallowed on error)."""
+    try:
+        name = f"debug_odds_fail_{fixture_id}_{tag}_{int(time.time())}.png"
+        await page.screenshot(path=name)
+        print(f"    [Debug] Screenshot saved: {name}")
+    except Exception:
+        pass
+
+
+# ── Intro Dialog Dismissal ────────────────────────────────────────────────
+
+async def _dismiss_intro_dialog(page: Page) -> None:
+    """
+    Football.com match pages show a multi-step intro dialog on first visit.
+    Step 1: Click "Next" button (may appear multiple times).
+    Step 2: Click "GOT IT!" / "Got it" button.
+    Uses knowledge.json selectors + hardcoded fallbacks.
+    """
+    NEXT_SELECTORS = [
+        _sel("intro_dialog_btn") or ".intro-dialog button",
+        'span[data-cms-key="next"]',
+        'button:has-text("Next")',
+        'span:has-text("Next")',
+    ]
+    CONFIRM_SELECTORS = [
+        'span[data-cms-key="confirm_btn_text"]',
+        'button:has-text("GOT IT!")',
+        'button:has-text("Got it")',
+        'button:has-text("OK")',
+        'span:has-text("GOT IT!")',
+        'span:has-text("Got it")',
+    ]
+
+    # Click "Next" up to 5 times (some tours have multiple steps)
+    for _ in range(5):
+        clicked = False
+        for sel in NEXT_SELECTORS:
+            if not sel:
+                continue
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=800):
+                    await loc.click(force=True)
+                    clicked = True
+                    await asyncio.sleep(0.5)
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            break
+
+    # Click "GOT IT!" / confirm
+    for sel in CONFIRM_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=800):
+                await loc.click(force=True)
+                await asyncio.sleep(0.4)
+                print("    [Dialog] Intro dialog dismissed.")
+                return
+        except Exception:
+            continue
+
+
+# ── Recursive Scroll ──────────────────────────────────────────────────────
+
+async def _recursive_scroll_markets(page: Page) -> int:
+    """
+    Scrolls to load ALL [data-market-id] containers.
+    Stops only after 3 consecutive scrolls add zero new containers.
+    Returns: total count of containers found.
+    """
+    MARKET_CONTAINER_SEL = _sel("market_items") or "[data-market-id]"
+    no_growth_count = 0
+    prev_count = 0
+
+    for scroll_round in range(30):  # safety cap
+        count = await page.locator(MARKET_CONTAINER_SEL).count()
+
+        if count > prev_count:
+            no_growth_count = 0
+            prev_count = count
+        else:
+            no_growth_count += 1
+
+        if no_growth_count >= 3:
+            break
+
+        await page.evaluate("window.scrollBy(0, window.innerHeight)")
+        await asyncio.sleep(0.8)
+
+    return prev_count
+
+
+# ── Recursive Expand ──────────────────────────────────────────────────────
+
+async def _expand_all_markets(page: Page) -> int:
+    """
+    Expands every collapsed market container on the page.
+    Uses knowledge.json fb_match_page.market_toggle_icon + market_header.
+    Returns: count of containers expanded.
+    """
+    toggle_icon_sel = _sel("market_toggle_icon") or ".m-market-title .toggle-all-icon"
+    market_header_sel = _sel("market_header") or ".market-title-bar, .m-market-title"
+    row_sel = ".m-table-row"
+
+    expanded_count = 0
+    containers = await page.locator("[data-market-id]").all()
+
+    for container in containers:
+        try:
+            # Detect collapsed: no visible rows OR aria-expanded=false
+            is_collapsed = await container.evaluate("""(el) => {
+                const hdr = el.querySelector('[aria-expanded="false"], .collapsed, [class*="collapsed"]');
+                if (hdr) return true;
+                const rows = el.querySelectorAll('.m-table-row');
+                if (rows.length === 0) return true;
+                const first = rows[0];
+                const style = window.getComputedStyle(first);
+                return style.display === 'none' || style.visibility === 'hidden'
+                    || parseFloat(style.height || '1') < 1;
+            }""")
+
+            if not is_collapsed:
+                continue
+
+            # Try clicking the toggle icon first, then the header
+            clicked = False
+            for sel in [toggle_icon_sel, market_header_sel, "[data-toggle]", "[aria-expanded]"]:
+                try:
+                    toggle = container.locator(sel).first
+                    if await toggle.count() > 0:
+                        await toggle.click(force=True)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Last resort: click the container itself
+                try:
+                    await container.click(force=True)
+                except Exception:
+                    await container.evaluate("el => el.click()")
+
+            # Wait for rows to appear
+            market_id = await container.get_attribute("data-market-id") or ""
+            try:
+                await page.wait_for_selector(
+                    f"[data-market-id='{market_id}'] {row_sel}",
+                    state="visible", timeout=1500,
+                )
+            except Exception:
+                pass
+
+            await asyncio.sleep(0.15)
+            expanded_count += 1
+
+        except Exception:
+            continue
+
+    return expanded_count
+
+
 # ── Extractor ─────────────────────────────────────────────────────────────
 
 class OddsExtractor:
@@ -58,6 +234,13 @@ class OddsExtractor:
     Extracts all ranked market odds from a football.com match detail page.
     Page MUST already be navigated — extract() never calls page.goto().
     Saves each market batch to SQLite immediately after extraction.
+
+    v5.0 pipeline per match:
+      1. Dismiss intro dialog
+      2. Recursive scroll until no new [data-market-id] containers
+      3. Expand ALL collapsed markets
+      4. Extract outcomes from each ranked market
+      5. Screenshot + log on zero outcomes
     """
 
     def __init__(self, page: Page, conn: sqlite3.Connection) -> None:
@@ -70,11 +253,9 @@ class OddsExtractor:
     async def _assert_no_login(page: Page) -> None:
         LOGIN_INDICATORS = [
             ".user-account", ".user-balance", ".logout-btn",
-            "[data-test='user-menu']",
-            "[class*='user-logged']",
-            "[class*='account-balance']",
-            ".m-account-info", ".m-user-panel",
-            "a[href*='logout']",
+            "[data-test='user-menu']", "[class*='user-logged']",
+            "[class*='account-balance']", ".m-account-info",
+            ".m-user-panel", "a[href*='logout']",
         ]
         for sel in LOGIN_INDICATORS:
             try:
@@ -82,8 +263,7 @@ class OddsExtractor:
                 if el and await el.is_visible():
                     raise RuntimeError(
                         "OddsExtractor: active login session detected. "
-                        "Odds extraction must run without login. "
-                        "Restart without logging in."
+                        "Odds extraction must run without login."
                     )
             except RuntimeError:
                 raise
@@ -109,28 +289,45 @@ class OddsExtractor:
         """
         Page is ALREADY navigated to the match detail URL.
         Do NOT call page.goto() inside this method.
-        Scrolls the full page first to ensure all market containers are
-        in the DOM (they are lazy-loaded), then iterates the catalogue.
-        Saves each market batch to SQLite immediately after extraction.
-        """
-        from Modules.Flashscore.fs_league_hydration import _scroll_to_load
 
+        Pipeline:
+          1. Dismiss intro dialog (Next → GOT IT!)
+          2. Recursive scroll all [data-market-id]
+          3. Expand all collapsed markets
+          4. Iterate ranked_markets catalogue and extract outcomes
+          5. Immediate batch save per market
+        """
         start = time.monotonic()
         markets_found = 0
         outcomes_written = 0
 
+        # Selectors from knowledge.json
+        outcome_row_sel = _sel("market_outcome_row") or ".m-table-row.un-gap-4"
+        outcome_label_sel = (
+            _sel("market_outcome_label")
+            or "span.un-text-rem-\\[12px\\], span[class*='un-text-rem'][class*='12']"
+        )
+        outcome_odds_sel = (
+            _sel("market_outcome_odds")
+            or "span.un-text-rem-\\[14px\\].un-font-bold, span.un-font-bold[class*='un-text-rem']"
+        )
+
         try:
             await self._assert_no_login(self.page)
 
-            # Hydrate the page — scroll until all [data-market-id] containers
-            # are stable in the DOM. Without this, containers below the initial
-            # viewport are invisible to query_selector and silently skipped.
-            containers_found = await _scroll_to_load(
-                self.page, "[data-market-id]"
-            )
-            print(f"    [Odds] {fixture_id}: {containers_found} market containers hydrated")
+            # ── Step 1: Dismiss intro dialog ──
+            await _dismiss_intro_dialog(self.page)
 
-            # De-duplicate market IDs so we visit each container once
+            # ── Step 2: Recursive scroll to hydrate all market containers ──
+            containers_found = await _recursive_scroll_markets(self.page)
+            print(f"    [Odds] {fixture_id}: {containers_found} market containers loaded")
+
+            # ── Step 3: Expand ALL collapsed markets ──
+            expanded = await _expand_all_markets(self.page)
+            if expanded:
+                print(f"    [Odds] {fixture_id}: expanded {expanded} collapsed markets")
+
+            # ── Step 4: Extract from ranked_markets catalogue ──
             seen_market_ids: set = set()
 
             for market in _MARKET_CATALOGUE:
@@ -140,11 +337,7 @@ class OddsExtractor:
                 likelihood = market.get("likelihood_percent", 0)
                 rank = market.get("rank", 0)
 
-                if not market_id:
-                    continue
-
-                # Skip if this market_id container was already processed
-                if market_id in seen_market_ids:
+                if not market_id or market_id in seen_market_ids:
                     continue
 
                 # Find the container on the page
@@ -157,72 +350,25 @@ class OddsExtractor:
                 seen_market_ids.add(market_id)
                 markets_found += 1
 
-                # ── FIX 2 (2026-03-17): Expand collapsed accordion before reading rows ──────
-                # football.com renders all [data-market-id] containers in the DOM but keeps
-                # most collapsed by default. Rows are present in the DOM but have 0 height
-                # / display:none. We must click the header/toggle to expand BEFORE querying
-                # .m-table-row, otherwise all rows return empty inner_text() and are skipped.
-                try:
-                    await container.scroll_into_view_if_needed()
-                    await asyncio.sleep(0.15)
+                # Extract outcome rows
+                outcome_rows = await container.query_selector_all(
+                    outcome_row_sel.replace("\\[", "[").replace("\\]", "]")
+                    if "\\" in outcome_row_sel else outcome_row_sel
+                )
 
-                    # Detect collapsed state via aria-expanded, CSS class, or hidden children
-                    is_collapsed = await container.evaluate("""(el) => {
-                        // Check header aria-expanded
-                        const hdr = el.querySelector(
-                            '[aria-expanded="false"], .collapsed, [class*="collapsed"]'
-                        );
-                        if (hdr) return true;
-                        // Fallback: check if first row is hidden
-                        const firstRow = el.querySelector('.m-table-row');
-                        if (!firstRow) return true;
-                        const style = window.getComputedStyle(firstRow);
-                        return style.display === 'none' || style.visibility === 'hidden'
-                            || parseFloat(style.height || '1') < 1;
-                    }""")
-
-                    if is_collapsed:
-                        toggle = await container.query_selector(
-                            ".market-header, [class*='market-header'], "
-                            "[class*='expand'], [class*='accordion-toggle'], "
-                            "[class*='header']:not([class*='page']), "
-                            "[data-toggle], [aria-expanded]"
-                        )
-                        target = toggle or container
-                        try:
-                            await target.click(force=True)
-                        except Exception:
-                            await container.evaluate("el => el.click()")
-                        # Wait for at least one row to become visible (up to 1.5s)
-                        try:
-                            await self.page.wait_for_selector(
-                                f"[data-market-id='{market_id}'] .m-table-row",
-                                state="visible",
-                                timeout=1500,
-                            )
-                        except Exception:
-                            pass  # Proceed anyway — might still have rows
-                        await asyncio.sleep(0.2)
-                except Exception:
-                    pass
-
-                # Real football.com structure (confirmed from booking_harvester.py):
-                # Each outcome is a .m-table-row, containing:
-                #   label: span.un-text-rem-[12px]
-                #   odds:  span.un-text-rem-[14px].un-font-bold
-                outcome_rows = await container.query_selector_all(".m-table-row")
+                # Fallback: try broader selector if specific one got 0 rows
+                if not outcome_rows:
+                    outcome_rows = await container.query_selector_all(".m-table-row")
 
                 batch: List[Dict] = []
                 extracted_at = now_ng().isoformat()
 
                 for row in outcome_rows:
                     try:
-                        # Label: span with the outcome name
                         name_el = await row.query_selector(
                             "span.un-text-rem-\\[12px\\], "
                             "span[class*='un-text-rem'][class*='12']"
                         )
-                        # Odds: bold span with the decimal value
                         odds_el = await row.query_selector(
                             "span.un-text-rem-\\[14px\\].un-font-bold, "
                             "span.un-font-bold[class*='un-text-rem']"
@@ -256,16 +402,27 @@ class OddsExtractor:
                     except Exception:
                         continue
 
-                # IMMEDIATE save after each market — not at extract() end
+                # IMMEDIATE save after each market
                 if batch:
                     written = upsert_match_odds_batch(self.conn, batch)
                     outcomes_written += written
+
+            # ── Step 5: Debug screenshot on zero outcomes ──
+            if outcomes_written == 0 and markets_found > 0:
+                print(
+                    f"    [Odds] WARNING: {fixture_id} — {markets_found} markets found "
+                    f"but 0 outcomes extracted. Saving debug screenshot."
+                )
+                await _safe_screenshot(self.page, fixture_id, "zero_outcomes")
 
         except RuntimeError:
             raise  # login guard — fatal, re-raise
         except Exception as e:
             elapsed = int((time.monotonic() - start) * 1000)
+            is_context_closed = "closed" in str(e).lower()
+            tag = "context_closed" if is_context_closed else "error"
             print(f"    [ODDS ERROR] {fixture_id}: {e}")
+            await _safe_screenshot(self.page, fixture_id, tag)
             return OddsResult(
                 fixture_id=fixture_id,
                 site_match_id=site_match_id,

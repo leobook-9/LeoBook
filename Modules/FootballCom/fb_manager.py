@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -161,9 +162,8 @@ async def _odds_worker(
     Semaphore-bounded odds extractor worker.
     Opens its own page, extracts, closes page.
 
-    FIX 3 (2026-03-17): Added retry loop (3 attempts, base 2s backoff) when
-    outcomes_extracted == 0. Collapsed accordion containers occasionally require
-    a full page reload + re-extraction to yield rows after the expand click.
+    v5.0 (2026-03-17): Handles context-closed errors gracefully,
+    takes debug screenshot on 0 outcomes after final retry.
     """
     async with sem:
         odds_page = None
@@ -210,6 +210,15 @@ async def _odds_worker(
                         print(f"    [Odds] {fixture_id}: reload failed: {reload_err}")
                         break
 
+            # Debug screenshot on final 0-outcome result
+            if result and result.outcomes_extracted == 0:
+                try:
+                    ss_name = f"debug_odds_final_{fixture_id}_{int(time.time())}.png"
+                    await odds_page.screenshot(path=ss_name)
+                    print(f"    [Debug] Final 0-outcome screenshot: {ss_name}")
+                except Exception:
+                    pass
+
             print(
                 f"    [Odds] {fixture_id} -> "
                 f"{result.markets_found} markets, "
@@ -219,14 +228,32 @@ async def _odds_worker(
             return result
 
         except Exception as e:
-            print(f"    [Odds] ERROR {match_row.get('fixture_id')}: {e}")
-            return None
+            err_str = str(e)
+            is_closed = "closed" in err_str.lower()
+            if is_closed:
+                print(f"    [Odds] {match_row.get('fixture_id')}: context/page closed — skipping gracefully")
+            else:
+                print(f"    [Odds] ERROR {match_row.get('fixture_id')}: {e}")
+            # Try screenshot before giving up
+            if odds_page:
+                try:
+                    ss_name = f"debug_odds_crash_{match_row.get('fixture_id', 'unknown')}_{int(time.time())}.png"
+                    await odds_page.screenshot(path=ss_name)
+                except Exception:
+                    pass
+            return OddsResult(
+                fixture_id=match_row.get("fixture_id", ""),
+                site_match_id=match_row.get("site_match_id", ""),
+                markets_found=0, outcomes_extracted=0,
+                duration_ms=0, error=err_str,
+            )
         finally:
             if odds_page:
                 try:
                     await odds_page.close()
                 except Exception:
                     pass
+
 
 
 # ── Concurrent league worker (semaphore-bounded) ───────────────────────
