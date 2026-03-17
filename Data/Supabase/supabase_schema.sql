@@ -1,8 +1,9 @@
 -- =============================================================================
--- GLOBAL SUPABASE SCHEMA (LeoBook) v3.0
--- Single source of truth. Columns MUST match db_helpers.py files_and_headers.
+-- GLOBAL SUPABASE SCHEMA (LeoBook) v4.0  (2026-03-17)
+-- Single source of truth. Columns MUST match sync_schema.py SUPABASE_SCHEMA.
+-- v4.0: fb_matches time→match_time, computed_standings VIEW, STEP 9 matching engine.
 -- PostgreSQL naming: only [a-z0-9_] allowed in column names.
--- CSV "over_2.5" maps to Supabase "over_2_5" via sync_manager.batch_upsert().
+-- CSV "over_2.5" maps to Supabase "over_2_5" via sync_manager._COL_REMAP.
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -274,11 +275,13 @@ DROP POLICY IF EXISTS "Public Read Access Standings" ON public.standings;
 CREATE POLICY "Public Read Access Standings" ON public.standings FOR
 SELECT USING (true);
 
--- fb_matches (17 columns) — CSV key: site_match_id
+-- fb_matches (17 columns) — key: site_match_id
+-- v4.0: renamed 'time' → 'match_time' (time is a reserved word in PostgreSQL).
+-- Upgrade path: ALTER TABLE public.fb_matches RENAME COLUMN time TO match_time;
 CREATE TABLE IF NOT EXISTS public.fb_matches (
     site_match_id TEXT PRIMARY KEY,
     date TEXT,
-    time TEXT,
+    match_time TEXT,  -- v4.0: was 'time' (reserved keyword)
     home_team TEXT,
     away_team TEXT,
     league TEXT,
@@ -292,10 +295,17 @@ CREATE TABLE IF NOT EXISTS public.fb_matches (
     booking_code TEXT,
     booking_url TEXT,
     status TEXT,
-    last_updated TIMESTAMP
-    WITH
-        TIME ZONE DEFAULT NOW ()
+    last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+-- Idempotent upgrade: rename column if old name still exists
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'fb_matches' AND column_name = 'time'
+    ) THEN
+        ALTER TABLE public.fb_matches RENAME COLUMN time TO match_time;
+    END IF;
+END $$;
 
 ALTER TABLE public.fb_matches ENABLE ROW LEVEL SECURITY;
 
@@ -540,3 +550,172 @@ BEGIN
         RAISE NOTICE 'Skipping auth.users trigger due to missing permissions: %', SQLERRM;
     END;
 END $$;
+
+-- =============================================================================
+-- 9. COMPUTED STANDINGS VIEW  (v4.0 — always computed, never stored)
+-- Standings are derived on-the-fly from schedules. Zero sync overhead.
+-- Flutter app and Python backend query computed_standings directly.
+-- =============================================================================
+
+CREATE OR REPLACE VIEW public.computed_standings AS
+WITH all_matches AS (
+    SELECT
+        league_id, NULL::TEXT AS season,
+        home_team_id AS team_id, home_team AS team_name,
+        home_score::INTEGER AS gf, away_score::INTEGER AS ga
+    FROM public.schedules
+    WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+      AND match_status = 'finished'
+    UNION ALL
+    SELECT
+        league_id, NULL::TEXT AS season,
+        away_team_id AS team_id, away_team AS team_name,
+        away_score::INTEGER AS gf, home_score::INTEGER AS ga
+    FROM public.schedules
+    WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+      AND match_status = 'finished'
+)
+SELECT
+    league_id, season, team_id, team_name,
+    COUNT(*) AS played,
+    SUM(CASE WHEN gf > ga THEN 1 ELSE 0 END) AS won,
+    SUM(CASE WHEN gf = ga THEN 1 ELSE 0 END) AS drawn,
+    SUM(CASE WHEN gf < ga THEN 1 ELSE 0 END) AS lost,
+    SUM(gf) AS goals_for,
+    SUM(ga) AS goals_against,
+    SUM(gf) - SUM(ga) AS goal_difference,
+    SUM(CASE WHEN gf > ga THEN 3 WHEN gf = ga THEN 1 ELSE 0 END) AS points
+FROM all_matches
+GROUP BY league_id, season, team_id, team_name;
+
+GRANT SELECT ON public.computed_standings TO anon, authenticated, service_role;
+
+-- =============================================================================
+-- 10. TEAM MATCHING ENGINE v1.2  (2026-03-17)
+-- Deterministic SQL-first fb_matches → schedules linkage.
+-- Python: SQL (confidence ≥ 88) → search_dict → LLM fallback.
+-- All objects use CREATE OR REPLACE / IF NOT EXISTS — safe to re-run.
+-- =============================================================================
+
+-- 10a: Name normalizer
+CREATE OR REPLACE FUNCTION public.normalize_team_name(raw TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE STRICT AS $$
+  SELECT TRIM(
+           REGEXP_REPLACE(
+             REGEXP_REPLACE(
+               LOWER(COALESCE(raw, '')),
+               '\m(fc|cf|sc|ac|bk|sk|fk|if|afc|bfc|sfc|united|city|town|rovers|wanderers|athletic|albion|county)\M',
+               '', 'gi'
+             ),
+             '[^a-z0-9]+', ' ', 'g'
+           )
+         )
+$$;
+GRANT EXECUTE ON FUNCTION public.normalize_team_name(TEXT) TO service_role, anon, authenticated;
+
+-- 10b: Candidate view (fb_matches × schedules, ±1 day window, normalized score)
+CREATE OR REPLACE VIEW public.fb_match_candidates AS
+SELECT
+    fb.site_match_id,
+    fb.date AS fb_date, fb.match_time AS fb_time,
+    fb.home_team AS fb_home, fb.away_team AS fb_away,
+    fb.league AS fb_league, fb.url AS fb_url,
+    s.fixture_id,
+    s.date AS s_date, s.match_time AS s_time,
+    s.home_team AS s_home, s.away_team AS s_away,
+    s.home_team_id, s.away_team_id, s.league_id, s.region_league,
+    CASE
+        WHEN public.normalize_team_name(fb.home_team) = public.normalize_team_name(s.home_team)
+         AND public.normalize_team_name(fb.away_team) = public.normalize_team_name(s.away_team)
+        THEN 100
+        WHEN (
+            public.normalize_team_name(fb.home_team) LIKE '%' || public.normalize_team_name(s.home_team) || '%'
+            OR public.normalize_team_name(s.home_team) LIKE '%' || public.normalize_team_name(fb.home_team) || '%'
+        ) AND (
+            public.normalize_team_name(fb.away_team) LIKE '%' || public.normalize_team_name(s.away_team) || '%'
+            OR public.normalize_team_name(s.away_team) LIKE '%' || public.normalize_team_name(fb.away_team) || '%'
+        ) THEN 88
+        ELSE 0
+    END AS confidence
+FROM public.fb_matches fb
+CROSS JOIN public.schedules s
+WHERE fb.date IS NOT NULL AND s.date IS NOT NULL
+  AND ABS(EXTRACT(EPOCH FROM (fb.date::DATE - s.date::DATE)) / 86400) <= 1
+  AND (fb.fixture_id IS NULL OR fb.matched IS NULL OR fb.matched = 'false')
+  AND (
+    public.normalize_team_name(fb.home_team) LIKE '%' || public.normalize_team_name(s.home_team) || '%'
+    OR public.normalize_team_name(s.home_team) LIKE '%' || public.normalize_team_name(fb.home_team) || '%'
+  );
+GRANT SELECT ON public.fb_match_candidates TO anon, authenticated, service_role;
+
+-- 10c: Per-row resolver — Python calls via supabase.rpc('match_fb_to_schedule', ...)
+CREATE OR REPLACE FUNCTION public.match_fb_to_schedule(p_site_match_id TEXT)
+RETURNS TABLE(fixture_id TEXT, confidence INTEGER, home_team_id TEXT, away_team_id TEXT,
+              s_home TEXT, s_away TEXT, s_date TEXT, s_time TEXT)
+LANGUAGE sql STABLE AS $$
+    SELECT c.fixture_id, c.confidence, c.home_team_id, c.away_team_id,
+           c.s_home, c.s_away, c.s_date, c.s_time
+    FROM public.fb_match_candidates c
+    WHERE c.site_match_id = p_site_match_id AND c.confidence > 0
+    ORDER BY c.confidence DESC, c.s_date ASC LIMIT 1;
+$$;
+GRANT EXECUTE ON FUNCTION public.match_fb_to_schedule(TEXT) TO service_role, anon, authenticated;
+
+-- 10d: Batch resolver — call after full harvest run
+CREATE OR REPLACE FUNCTION public.auto_match_fb_matches()
+RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE matched_count INTEGER := 0; rec RECORD;
+BEGIN
+    FOR rec IN
+        SELECT DISTINCT ON (site_match_id) site_match_id,
+               fixture_id AS resolved_fixture_id, confidence
+        FROM public.fb_match_candidates WHERE confidence >= 88
+        ORDER BY site_match_id, confidence DESC
+    LOOP
+        UPDATE public.fb_matches
+        SET fixture_id = rec.resolved_fixture_id, matched = 'sql_v1.2', last_updated = NOW()
+        WHERE site_match_id = rec.site_match_id AND (fixture_id IS NULL OR fixture_id = '');
+        IF FOUND THEN matched_count := matched_count + 1; END IF;
+    END LOOP;
+    RETURN matched_count;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.auto_match_fb_matches() TO service_role;
+
+-- 10e: Per-row trigger (fires on INSERT or UPDATE of matching columns)
+CREATE OR REPLACE FUNCTION public.trg_fn_auto_match_fb()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE best RECORD;
+BEGIN
+    IF NEW.fixture_id IS NOT NULL AND NEW.fixture_id <> '' THEN RETURN NEW; END IF;
+    SELECT fixture_id, confidence INTO best
+    FROM public.match_fb_to_schedule(NEW.site_match_id) LIMIT 1;
+    IF FOUND AND best.confidence >= 88 THEN
+        NEW.fixture_id := best.fixture_id;
+        NEW.matched    := 'sql_v1.2';
+        NEW.last_updated := NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_auto_match_fb_matches ON public.fb_matches;
+CREATE TRIGGER trg_auto_match_fb_matches
+    BEFORE INSERT OR UPDATE OF home_team, away_team, date ON public.fb_matches
+    FOR EACH ROW EXECUTE FUNCTION public.trg_fn_auto_match_fb();
+
+-- 10f: Performance indexes
+CREATE INDEX IF NOT EXISTS idx_fb_matches_unresolved
+    ON public.fb_matches (date) WHERE fixture_id IS NULL OR fixture_id = '';
+CREATE INDEX IF NOT EXISTS idx_schedules_date_home_away
+    ON public.schedules (date, home_team, away_team);
+CREATE INDEX IF NOT EXISTS idx_schedules_date
+    ON public.schedules (date);
+
+GRANT SELECT ON public.fb_match_candidates TO anon, authenticated, service_role;
+-- =============================================================================
+-- Schema v4.0 complete.
+-- Tables: 14 core + views: computed_standings, fb_match_candidates
+-- Functions: normalize_team_name, match_fb_to_schedule, auto_match_fb_matches
+-- Triggers: trg_auto_match_fb_matches (per-row), update_*_last_updated (all tables)
+-- Run: SELECT public.auto_match_fb_matches(); to batch-link all fb_matches.
+-- =============================================================================

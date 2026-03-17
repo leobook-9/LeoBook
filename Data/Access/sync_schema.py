@@ -221,10 +221,140 @@ _BATCH_SIZES: Dict[str, int] = {
     'default':     2000,
 }
 
+# ── Matching Engine v1.2 — full idempotent SQL (STEP 9 from bootstrap) ────────
+# Used by any bootstrap/provision routine to install the SQL matching engine
+# on a fresh or existing Supabase project. Safe to re-run (CREATE OR REPLACE).
+# Run via:
+#   supabase.rpc('exec_sql', {'query': MATCHING_ENGINE_SQL})
+# or paste directly in Supabase SQL Editor.
+# v1.2 adds: normalize_team_name(), fb_match_candidates view,
+#             match_fb_to_schedule(), auto_match_fb_matches(),
+#             trg_auto_match_fb_matches trigger, performance indexes.
+MATCHING_ENGINE_SQL = """
+-- =============================================================================
+-- LEOBOOK Team Matching Engine v1.2  (2026-03-17) — STEP 9 bootstrap block
+-- Safe to re-run: CREATE OR REPLACE / IF NOT EXISTS throughout.
+-- =============================================================================
+
+-- 9a: Name normalizer
+CREATE OR REPLACE FUNCTION public.normalize_team_name(raw TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE STRICT AS $$
+  SELECT TRIM(
+           REGEXP_REPLACE(
+             REGEXP_REPLACE(
+               LOWER(COALESCE(raw, '')),
+               '\\m(fc|cf|sc|ac|bk|sk|fk|if|afc|bfc|sfc|united|city|town|rovers|wanderers|athletic|albion|county)\\M',
+               '', 'gi'
+             ),
+             '[^a-z0-9]+', ' ', 'g'
+           )
+         )
+$$;
+GRANT EXECUTE ON FUNCTION public.normalize_team_name(TEXT) TO service_role, anon, authenticated;
+
+-- 9b: Candidate view (fb_matches x schedules with confidence score)
+CREATE OR REPLACE VIEW public.fb_match_candidates AS
+SELECT
+    fb.site_match_id,
+    fb.date AS fb_date, fb.match_time AS fb_time,
+    fb.home_team AS fb_home, fb.away_team AS fb_away,
+    fb.league AS fb_league, fb.url AS fb_url,
+    s.fixture_id,
+    s.date AS s_date, s.match_time AS s_time,
+    s.home_team AS s_home, s.away_team AS s_away,
+    s.home_team_id, s.away_team_id, s.league_id, s.region_league,
+    CASE
+        WHEN public.normalize_team_name(fb.home_team) = public.normalize_team_name(s.home_team)
+         AND public.normalize_team_name(fb.away_team) = public.normalize_team_name(s.away_team)
+        THEN 100
+        WHEN (
+            public.normalize_team_name(fb.home_team) LIKE '%' || public.normalize_team_name(s.home_team) || '%'
+            OR public.normalize_team_name(s.home_team) LIKE '%' || public.normalize_team_name(fb.home_team) || '%'
+        ) AND (
+            public.normalize_team_name(fb.away_team) LIKE '%' || public.normalize_team_name(s.away_team) || '%'
+            OR public.normalize_team_name(s.away_team) LIKE '%' || public.normalize_team_name(fb.away_team) || '%'
+        ) THEN 88
+        ELSE 0
+    END AS confidence
+FROM public.fb_matches fb
+CROSS JOIN public.schedules s
+WHERE fb.date IS NOT NULL AND s.date IS NOT NULL
+  AND ABS(EXTRACT(EPOCH FROM (fb.date::DATE - s.date::DATE)) / 86400) <= 1
+  AND (fb.fixture_id IS NULL OR fb.matched IS NULL OR fb.matched = 'false')
+  AND (
+    public.normalize_team_name(fb.home_team) LIKE '%' || public.normalize_team_name(s.home_team) || '%'
+    OR public.normalize_team_name(s.home_team) LIKE '%' || public.normalize_team_name(fb.home_team) || '%'
+  );
+GRANT SELECT ON public.fb_match_candidates TO anon, authenticated, service_role;
+
+-- 9c: Per-row resolver (callable from Python via Supabase RPC)
+CREATE OR REPLACE FUNCTION public.match_fb_to_schedule(p_site_match_id TEXT)
+RETURNS TABLE(fixture_id TEXT, confidence INTEGER, home_team_id TEXT, away_team_id TEXT,
+              s_home TEXT, s_away TEXT, s_date TEXT, s_time TEXT)
+LANGUAGE sql STABLE AS $$
+    SELECT c.fixture_id, c.confidence, c.home_team_id, c.away_team_id,
+           c.s_home, c.s_away, c.s_date, c.s_time
+    FROM public.fb_match_candidates c
+    WHERE c.site_match_id = p_site_match_id AND c.confidence > 0
+    ORDER BY c.confidence DESC, c.s_date ASC LIMIT 1;
+$$;
+GRANT EXECUTE ON FUNCTION public.match_fb_to_schedule(TEXT) TO service_role, anon, authenticated;
+
+-- 9d: Batch resolver (runs all unmatched fb_matches, returns count)
+CREATE OR REPLACE FUNCTION public.auto_match_fb_matches()
+RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE matched_count INTEGER := 0; rec RECORD;
+BEGIN
+    FOR rec IN
+        SELECT DISTINCT ON (site_match_id) site_match_id, fixture_id AS resolved_fixture_id, confidence
+        FROM public.fb_match_candidates WHERE confidence >= 88
+        ORDER BY site_match_id, confidence DESC
+    LOOP
+        UPDATE public.fb_matches
+        SET fixture_id = rec.resolved_fixture_id, matched = 'sql_v1.2', last_updated = NOW()
+        WHERE site_match_id = rec.site_match_id AND (fixture_id IS NULL OR fixture_id = '');
+        IF FOUND THEN matched_count := matched_count + 1; END IF;
+    END LOOP;
+    RETURN matched_count;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.auto_match_fb_matches() TO service_role;
+
+-- 9e: Per-row trigger (auto-matches each INSERT/UPDATE)
+CREATE OR REPLACE FUNCTION public.trg_fn_auto_match_fb()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE best RECORD;
+BEGIN
+    IF NEW.fixture_id IS NOT NULL AND NEW.fixture_id <> '' THEN RETURN NEW; END IF;
+    SELECT fixture_id, confidence INTO best FROM public.match_fb_to_schedule(NEW.site_match_id) LIMIT 1;
+    IF FOUND AND best.confidence >= 88 THEN
+        NEW.fixture_id := best.fixture_id; NEW.matched := 'sql_v1.2'; NEW.last_updated := NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_auto_match_fb_matches ON public.fb_matches;
+CREATE TRIGGER trg_auto_match_fb_matches
+    BEFORE INSERT OR UPDATE OF home_team, away_team, date ON public.fb_matches
+    FOR EACH ROW EXECUTE FUNCTION public.trg_fn_auto_match_fb();
+
+-- 9f: Performance indexes
+CREATE INDEX IF NOT EXISTS idx_fb_matches_unresolved ON public.fb_matches (date)
+    WHERE fixture_id IS NULL OR fixture_id = '';
+CREATE INDEX IF NOT EXISTS idx_schedules_date_home_away ON public.schedules (date, home_team, away_team);
+CREATE INDEX IF NOT EXISTS idx_schedules_date ON public.schedules (date);
+"""
+
+# Note: computed_standings VIEW is NOT in SUPABASE_SCHEMA because it is not
+# a synced table — it is a Postgres VIEW defined in the bootstrap SQL and
+# queried directly by the Flutter app and Python backend.
+# It is re-created by SUPABASE_SETUP.md STEP 6 (and Part 3B upgrade path).
+
 __all__ = [
     "TABLE_CONFIG",
     "SUPABASE_SCHEMA",
     "_ALLOWED_COLS",
     "_COL_REMAP",
     "_BATCH_SIZES",
+    "MATCHING_ENGINE_SQL",
 ]
