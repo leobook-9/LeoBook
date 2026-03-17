@@ -20,6 +20,35 @@ from .navigator import hide_overlays
 from Core.Intelligence.aigo_suite import AIGOSuite
 
 
+async def _recursive_scroll_cards(page: Page, card_sel: str) -> int:
+    """
+    Scrolls the page until no new cards appear for 3 consecutive rounds.
+    Same pattern as _recursive_scroll_markets in odds_extractor.py.
+    Returns: total count of cards found.
+    """
+    no_growth = 0
+    prev_count = 0
+
+    for _ in range(40):  # safety cap
+        count = await page.locator(card_sel).count()
+
+        if count > prev_count:
+            no_growth = 0
+            prev_count = count
+            print(f"      [Scroll] {_+1} steps -> {count} rows visible")
+        else:
+            no_growth += 1
+
+        if no_growth >= 3:
+            break
+
+        await page.evaluate("window.scrollBy(0, window.innerHeight)")
+        await asyncio.sleep(0.8)
+
+    # Scroll back to top for consistent state
+    await page.evaluate("window.scrollTo(0, 0)")
+    return prev_count
+
 async def _activate_and_wait_for_matches(
     page: Page,
     expected_count: int = 0,
@@ -31,7 +60,7 @@ async def _activate_and_wait_for_matches(
 
     Returns True if cards found, False if page is genuinely empty.
     """
-    from Modules.Flashscore.fs_league_hydration import _scroll_to_load
+    # Recursive scroll defined locally below — no Flashscore import needed
 
     # ── FIX 5 (2026-03-17): networkidle wait before empty-check ──────────────────
     # Previously the NO_DATA_SELECTORS check ran immediately after domcontentloaded,
@@ -97,7 +126,7 @@ async def _activate_and_wait_for_matches(
         or SelectorManager.get_selector("fb_schedule_page", "league_section")
         or ".match-card-section.match-card, .match-card, .league-title-wrapper"
     )
-    found = await _scroll_to_load(page, CARD_SEL)
+    found = await _recursive_scroll_cards(page, CARD_SEL)
 
     # Phase 3: result
     if expected_count > 0 and found < expected_count:
@@ -146,7 +175,7 @@ async def extract_league_matches(page: Page, target_date: str = None, target_lea
     """Iterates leagues and extracts matches with AIGO protection and hydration support."""
     if fb_url:
         print(f"    [Extractor] Navigating to {fb_url}...")
-        await page.goto(fb_url, wait_until='networkidle', timeout=60000)
+        await page.goto(fb_url, wait_until='domcontentloaded', timeout=30000)
     
     current_url = page.url
     print(f"  [Harvest] Sequence for {target_league_name or 'league'} -> {current_url}")
