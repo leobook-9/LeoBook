@@ -31,7 +31,7 @@ class DataRepository {
 
       final response = await query.order('date', ascending: false).limit(2000);
 
-      debugPrint('Loaded ${response.length} predictions from Supabase');
+      // Predictions loaded silently — count: ${response.length}
 
       // Cache data locally
       final prefs = await SharedPreferences.getInstance();
