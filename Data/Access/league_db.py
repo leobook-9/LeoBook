@@ -754,7 +754,9 @@ def upsert_prediction(conn: sqlite3.Connection, data: Dict[str, Any]):
         "market_reliability_score", "home_crest_url", "away_crest_url",
         "recommendation_score", "h2h_fixture_ids", "form_fixture_ids",
         "standings_snapshot", "league_stage", "generated_at",
-        "home_score", "away_score", "last_updated",
+        "home_score", "away_score", "chosen_market", "market_id",
+        "rule_explanation", "override_reason", "statistical_edge",
+        "pure_model_suggestion", "last_updated",
     ]
     values = {c: data.get(c) for c in cols}
     values["last_updated"] = now

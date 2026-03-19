@@ -302,6 +302,11 @@ async def run_predictions(conn=None, fixtures: List[Dict] = None, scheduler=None
             prediction["market_reliability"] = round(merged["confidence"] * 100, 1)
             prediction["rule_explanation"] = rule_output["explanation"]
             prediction["override_reason"] = rule_output.get("override_reason")
+            prediction["chosen_market"] = rule_output["chosen_market"]
+            prediction["market_id"] = rule_output["market_id"]
+            prediction["statistical_edge"] = rule_output["statistical_edge"]
+            # Use RuleEngine's top score as the pure model suggestion since we removed Poisson
+            prediction["pure_model_suggestion"] = "Poisson Top Score: " + rule_prediction.get("best_score", "1-1")
 
             # Update confidence label based on merged confidence
             conf = merged["confidence"]

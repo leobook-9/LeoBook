@@ -109,6 +109,12 @@ _SCHEMA_SQL = """
         generated_at        TEXT,
         home_score          TEXT,
         away_score          TEXT,
+        chosen_market       TEXT,
+        market_id           TEXT,
+        rule_explanation    TEXT,
+        override_reason     TEXT,
+        statistical_edge    REAL,
+        pure_model_suggestion TEXT,
         last_updated        TEXT DEFAULT (datetime('now'))
     );
 
@@ -279,6 +285,12 @@ _ALTER_MIGRATIONS = [
     ("teams", "hq_crest", "INTEGER DEFAULT 0"),
     ("schedules", "region_league", "TEXT"),
     ("schedules", "match_link", "TEXT"),
+    ("predictions", "chosen_market", "TEXT"),
+    ("predictions", "market_id", "TEXT"),
+    ("predictions", "rule_explanation", "TEXT"),
+    ("predictions", "override_reason", "TEXT"),
+    ("predictions", "statistical_edge", "REAL"),
+    ("predictions", "pure_model_suggestion", "TEXT"),
 ]
 
 # ── CSV → SQLite import map ───────────────────────────────────────────────────

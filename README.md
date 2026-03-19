@@ -112,7 +112,7 @@ LeoBook/
 │   │   └── fs_extractor.py         # Live streamer depends on this — do NOT delete
 │   ├── FootballCom/
 │   │   ├── fb_manager.py           # Batch resume checkpoint (v9.3)
-│   │   ├── match_resolver.py       # GrokMatcher — 3-stage cascade (v9.3 restored)
+│   │   ├── match_resolver.py       # FixtureResolver — Deterministic SQL matcher
 │   │   ├── navigator.py
 │   │   ├── odds_extractor.py
 │   │   └── booker/

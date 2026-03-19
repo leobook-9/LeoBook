@@ -124,6 +124,9 @@ class LearningEngine:
             if not rows:
                 return {}, {}
 
+            from Core.Intelligence.dynamic_concurrency import DynamicConcurrencyEngine
+            max_workers = DynamicConcurrencyEngine.get_for_rl(len(rows))
+
             for row in rows:
                 if row.get('outcome_correct') not in ['True', 'False', '1', '0']:
                     continue

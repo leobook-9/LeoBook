@@ -180,10 +180,10 @@ class HomeCubit extends Cubit<HomeState> {
         debugPrint("TeamCrests Stream Error: $e");
       });
 
-      // --- Start 30-second periodic refresh (upsert-only, skips if no changes) ---
+      // --- Start 3-second periodic refresh (upsert-only, skips if no changes) ---
       _refreshTimer?.cancel();
       _refreshTimer = Timer.periodic(
-        const Duration(seconds: 30),
+        const Duration(seconds: 3),
         (_) => _periodicRefresh(),
       );
     } catch (e) {

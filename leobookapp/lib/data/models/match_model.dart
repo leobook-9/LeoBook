@@ -33,6 +33,13 @@ class MatchModel {
   final int? homeFormN;
   final int? awayFormN;
 
+  final String? chosenMarket;
+  final String? marketId;
+  final String? ruleExplanation;
+  final String? overrideReason;
+  final double? statisticalEdge;
+  final String? pureModelSuggestion;
+
   final String? homeTeamId;
   final String? awayTeamId;
   final String? outcomeCorrect; // From predictions CSV outcome_correct column
@@ -66,8 +73,23 @@ class MatchModel {
     this.reasonTags,
     this.homeFormN,
     this.awayFormN,
+    this.chosenMarket,
+    this.marketId,
+    this.ruleExplanation,
+    this.overrideReason,
+    this.statisticalEdge,
+    this.pureModelSuggestion,
     this.outcomeCorrect,
   });
+
+  Map<String, dynamic> get ruleOutput => {
+        "chosen_market": chosenMarket ?? prediction ?? "Unknown",
+        "market_id": marketId ?? "",
+        "rule_explanation": ruleExplanation ?? "Standard model choice based on available historical data.",
+        "override_reason": overrideReason,
+        "statistical_edge": (statisticalEdge ?? 0.0).toStringAsFixed(1),
+        "pure_model_suggestion": pureModelSuggestion ?? "N/A",
+      };
 
   String get aiReasoningSentence {
     if (reasonTags == null || reasonTags!.isEmpty) {
@@ -392,6 +414,13 @@ class MatchModel {
     String? reasonTags;
     bool isFeatured = false;
 
+    String? chosenMarket;
+    String? marketId;
+    String? ruleExplanation;
+    String? overrideReason;
+    double? statisticalEdge;
+    String? pureModelSuggestion;
+
     if (predictionData != null) {
       prediction = predictionData['prediction'];
       confidence = predictionData['confidence'];
@@ -401,6 +430,13 @@ class MatchModel {
       xgHome = double.tryParse(predictionData['xg_home']?.toString() ?? '');
       xgAway = double.tryParse(predictionData['xg_away']?.toString() ?? '');
       reasonTags = predictionData['reason']?.toString();
+
+      chosenMarket = predictionData['chosen_market']?.toString();
+      marketId = predictionData['market_id']?.toString();
+      ruleExplanation = predictionData['rule_explanation']?.toString();
+      overrideReason = predictionData['override_reason']?.toString();
+      statisticalEdge = double.tryParse(predictionData['statistical_edge']?.toString() ?? '');
+      pureModelSuggestion = predictionData['pure_model_suggestion']?.toString();
 
       if (confidence != null &&
           (confidence.contains('High') || confidence.contains('Very High'))) {
@@ -443,6 +479,12 @@ class MatchModel {
       reasonTags: _clean(reasonTags),
       homeFormN: int.tryParse(row['home_form_n']?.toString() ?? ''),
       awayFormN: int.tryParse(row['away_form_n']?.toString() ?? ''),
+      chosenMarket: chosenMarket,
+      marketId: marketId,
+      ruleExplanation: ruleExplanation,
+      overrideReason: overrideReason,
+      statisticalEdge: statisticalEdge,
+      pureModelSuggestion: pureModelSuggestion,
       outcomeCorrect: outcomeCorrect,
     );
   }
@@ -477,6 +519,12 @@ class MatchModel {
       reasonTags: reasonTags, // Preserve existing
       homeFormN: homeFormN, // Preserve existing
       awayFormN: awayFormN, // Preserve existing
+      chosenMarket: chosenMarket,
+      marketId: marketId,
+      ruleExplanation: ruleExplanation,
+      overrideReason: overrideReason,
+      statisticalEdge: statisticalEdge,
+      pureModelSuggestion: pureModelSuggestion,
       outcomeCorrect: other.outcomeCorrect ?? outcomeCorrect,
     );
   }

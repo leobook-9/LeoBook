@@ -620,6 +620,8 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
   }
 
   Widget _buildExpertPrediction() {
+    final ruleOutput = match.ruleOutput;
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -660,29 +662,32 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    match.prediction ?? "No prediction available",
-                    style: GoogleFonts.lexend(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w900,
-                      height: 1.1,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      ruleOutput["chosen_market"].toString(),
+                      style: GoogleFonts.lexend(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                        height: 1.1,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    "Confidence: ${match.confidence ?? 'N/A'}",
-                    style: GoogleFonts.lexend(
-                      color: Colors.white60,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
+                    const SizedBox(height: 4),
+                    Text(
+                      "Confidence: ${ruleOutput['statistical_edge']}%",
+                      style: GoogleFonts.lexend(
+                        color: Colors.white60,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
+              const SizedBox(width: 16),
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
@@ -717,7 +722,36 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
             ],
           ),
           const SizedBox(height: 16),
+          if (ruleOutput["override_reason"] != null) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: Colors.amber.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.withValues(alpha: 0.5)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      "Rule override: ${ruleOutput['override_reason']}",
+                      style: GoogleFonts.lexend(
+                        color: Colors.amber,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           Container(
+            width: double.infinity,
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: Colors.black26,
@@ -736,7 +770,7 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      "POISSON MODEL ANALYSIS",
+                      "SEMANTIC RULE ANALYSIS",
                       style: GoogleFonts.lexend(
                         color: Colors.cyanAccent,
                         fontSize: 10,
@@ -748,7 +782,7 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  match.aiReasoningSentence,
+                  ruleOutput["rule_explanation"].toString(),
                   style: GoogleFonts.lexend(
                     color: Colors.white70,
                     fontSize: 11,
@@ -757,6 +791,15 @@ class _MatchDetailsScreenState extends State<MatchDetailsScreen> {
                   ),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            "Pure model suggested: ${ruleOutput['pure_model_suggestion']}",
+            style: GoogleFonts.lexend(
+              color: Colors.white38,
+              fontSize: 10,
+              fontStyle: FontStyle.italic,
             ),
           ),
         ],

@@ -75,7 +75,7 @@ candidates = [
 ]
 ```
 The comment above it (lines 248-251) explicitly documents the fix:
-> `extract_league_matches()` returns dicts with `'home'`/`'away'` keys, but `GrokMatcher.resolve_with_cascade()` reads `'home_team'`/`'away_team'`. Adding both aliases here means neither side needs to change.
+> `extract_league_matches()` returns dicts with `'home'`/`'away'` keys, but `FixtureResolver.resolve()` reads `'home_team'`/`'away_team'`. Adding both aliases here means neither side needs to change.
 
 ### Audit Q4 — Fix present?
 

@@ -35,9 +35,7 @@ from Data.Access.db_helpers import (
 from Data.Access.league_db import LEAGUES_JSON_PATH
 
 
-# ── SearchDict guards ──────────────────────────────────────────────────
-_ENRICHMENT_IN_PROGRESS: set[str] = set()
-_ENRICHMENT_LOCK: asyncio.Lock = asyncio.Lock()
+
 
 # ── Batch resume checkpoint ─────────────────────────────────────────────
 _CHECKPOINT_PATH = Path("Data/Logs/batch_checkpoint.json")
@@ -341,7 +339,7 @@ async def _league_worker(
 
                 # Normalise key names before passing to the resolver.
                 # extract_league_matches() returns dicts with 'home'/'away' keys,
-                # but GrokMatcher.resolve_with_cascade() reads 'home_team'/'away_team'.
+                # but FixtureResolver.resolve() reads 'home_team'/'away_team'.
                 # Adding both aliases here means neither side needs to change.
                 raw_candidates = [
                     m for m in all_page_matches
@@ -372,54 +370,7 @@ async def _league_worker(
                     pass
 
 
-# ── SearchDict Enrichment logic ──────────────────────────────────────
 
-async def _run_searchdict_enrichment(
-    resolved_matches: List[Dict],
-    conn: sqlite3.Connection,
-) -> None:
-    """
-    One-shot SearchDict enrichment for all unique teams
-    resolved this session. Runs ONCE between league phase
-    and odds phase. Deduplicates by team name before LLM call.
-    """
-    try:
-        team_pairs = []
-        seen_names = set()
-        
-        for m in resolved_matches:
-            # matched == True (only resolved fixtures) checked by caller
-            # Each match dict has keys: home, away (Football.com names)
-            for prefix in ["home", "away"]:
-                name = m.get(prefix)
-                tid = m.get(f"{prefix}_id") # FS ID added in _league_worker
-                
-                if name and name not in seen_names:
-                    if name not in _ENRICHMENT_IN_PROGRESS:
-                        if tid:
-                            team_pairs.append({"team_id": tid, "team_name": name})
-                            seen_names.add(name)
-
-        if not team_pairs:
-            print("    [SearchDict] All teams already enriched this session.")
-            return
-
-        async with _ENRICHMENT_LOCK:
-            # Re-filter inside lock for concurrency safety
-            final_pairs = [p for p in team_pairs if p["team_name"] not in _ENRICHMENT_IN_PROGRESS]
-            if not final_pairs:
-                print("    [SearchDict] All teams already enriched this session.")
-                return
-
-            for p in final_pairs:
-                _ENRICHMENT_IN_PROGRESS.add(p["team_name"])
-
-            from Scripts.build_search_dict import enrich_batch_teams_search_dict
-            print(f"    [SearchDict] Enriched {len(final_pairs)} teams in batch.")
-            await enrich_batch_teams_search_dict(final_pairs)
-
-    except Exception as e:
-        print(f"    [SearchDict] Enrichment failed: {e} — continuing.")
 
 
 # ── CHAPTER 1 PAGE 1 — Odds Harvesting ─────────────────────────────────
@@ -443,7 +394,7 @@ async def run_odds_harvesting(playwright: Playwright):
 
     from Core.Intelligence.prediction_pipeline import get_weekly_fixtures
     from Data.Access.league_db import init_db, get_connection
-    from .match_resolver import GrokMatcher
+    from .match_resolver import FixtureResolver
 
     conn = init_db()
     weekly_fixtures = get_weekly_fixtures(conn)
@@ -488,7 +439,7 @@ async def run_odds_harvesting(playwright: Playwright):
           f"({total_leagues} page loads, was {total_fixtures}).")
 
     # 4. Launch matcher
-    matcher = GrokMatcher()
+    matcher = FixtureResolver()
     all_resolved_matches: List[Dict] = []
     total_session_odds_count = 0
 
@@ -556,7 +507,7 @@ async def run_odds_harvesting(playwright: Playwright):
                 fs_fix = pair['fs_fix']
                 candidates = pair['candidates']
 
-                match_row, score, method = await matcher.resolve_with_cascade(
+                match_row, score, method = await matcher.resolve(
                     fs_fix, candidates, conn
                 )
 
@@ -614,9 +565,7 @@ async def run_odds_harvesting(playwright: Playwright):
     print("\n  [Post-Harvest] Starting global enrichment and sync...")
     
     # ── SearchDict: one-shot batch enrichment ──────────────
-    all_resolved = [m for m in all_resolved_matches if m.get("matched")]
-    if all_resolved:
-        await _run_searchdict_enrichment(all_resolved, conn)
+    # Skipped per directive: search_dict fallbacks removed
     
     # ── Supabase Sync ──────────────────────────────────────
     if all_resolved or total_session_odds_count > 0:
@@ -631,20 +580,16 @@ async def run_odds_harvesting(playwright: Playwright):
 
     # Session Summary
     method_counts = {
-        "search_terms": sum(1 for m in all_resolved_matches if m.get("resolution_method") == "search_terms"),
-        "fuzzy":        sum(1 for m in all_resolved_matches if m.get("resolution_method") == "fuzzy"),
-        "llm":          sum(1 for m in all_resolved_matches if m.get("resolution_method") == "llm"),
+        "sql_v2":       sum(1 for m in all_resolved_matches if m.get("resolution_method") == "sql_v2.0"),
         "failed":       sum(1 for m in all_resolved_matches if m.get("resolution_method") == "failed"),
     }
-    resolved_count = method_counts["search_terms"] + method_counts["fuzzy"] + method_counts["llm"]
+    resolved_count = method_counts["sql_v2"]
 
     print(f"\n    [Ch1 P1] -- Session Summary --------------------------")
     print(f"    [Ch1 P1] Fixtures processed  : {total_fixtures}")
     print(f"    [Ch1 P1] Leagues navigated   : {total_leagues}")
     print(f"    [Ch1 P1] Resolved            : {resolved_count}")
-    print(f"    [Ch1 P1]   - search_terms    : {method_counts['search_terms']}")
-    print(f"    [Ch1 P1]   - fuzzy           : {method_counts['fuzzy']}")
-    print(f"    [Ch1 P1]   - llm             : {method_counts['llm']}")
+    print(f"    [Ch1 P1]   - exact SQL       : {method_counts['sql_v2']}")
     print(f"    [Ch1 P1] Unresolved          : {method_counts['failed']}")
     print(f"    [Ch1 P1] Odds outcomes       : {total_session_odds_count}")
     print(f"    [Ch1 P1] -------------------------------------------------\n")
